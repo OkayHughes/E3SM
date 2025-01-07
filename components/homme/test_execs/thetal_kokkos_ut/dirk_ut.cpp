@@ -502,7 +502,7 @@ TEST_CASE ("dirk_pieces_testing") {
           pi = idx / dfi::packn,
           si = idx % dfi::packn;
         for (int k = 0; k < nlev; ++k)
-                  REQUIRE(equal_idx(dpnh_dp_im(k,pi)[si], dpnh_dp_if(k,i,j),i,j,k, 1e2*eps));
+                  REQUIRE(equal(dpnh_dp_im(k,pi)[si], dpnh_dp_if(k,i,j), 1e2*eps));
       }
   }
 
