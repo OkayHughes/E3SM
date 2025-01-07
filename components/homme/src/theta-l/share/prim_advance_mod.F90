@@ -1102,7 +1102,7 @@ contains
   real (kind=real_kind) ::  temp(np,np,nlev)
   real (kind=real_kind) ::  vtemp(np,np,2,nlev)       ! generic gradient storage
   real (kind=real_kind), dimension(np,np) :: sdot_sum ! temporary field
-  real (kind=real_kind) ::  v1,v2,w,d_eta_dot_dpdn_dn, T0, w_tmp
+  real (kind=real_kind) ::  v1,v2,w,d_eta_dot_dpdn_dn, T0, w_tmp, bfb_scale
   integer :: i,j,k,kptr,ie, nlyr_tot
 
   real (kind=real_kind) ::  rheighti(np,np,nlevp), rheightm(np,np,nlev), rhatm(np,np,nlev), r0
@@ -1696,13 +1696,17 @@ endif
 
 #endif
 #ifdef DA
-
+#ifdef HOMMEXX_BFB_TESTING  
+              bfb_scale = 1.0_real_kind
+#else
+              bfb_scale = scale1
+#endif
           
               if (.not. theta_hydrostatic_mode) then
               w_tmp = (elem(ie)%state%w_i(i,j,k,n0) + elem(ie)%state%w_i(i,j,k+1,n0))/(2.0_real_kind)
-              vtens1(i,j,k) = vtens1(i,j,k) - w_tmp * v1 / rheightm(i,j,k)
-              vtens1(i,j,k) = vtens1(i,j,k) - w_tmp * elem(ie)%fcorcosine(i,j)
-              vtens2(i,j,k) = vtens2(i,j,k) - w_tmp*v2/rheightm(i,j,k)
+              vtens1(i,j,k) = vtens1(i,j,k) - bfb_scale*w_tmp * v1 / rheightm(i,j,k)
+              vtens1(i,j,k) = vtens1(i,j,k) - bfb_scale*w_tmp * elem(ie)%fcorcosine(i,j)
+              vtens2(i,j,k) = vtens2(i,j,k) - bfb_scale*w_tmp*v2/rheightm(i,j,k)
               end if
 #endif
 
