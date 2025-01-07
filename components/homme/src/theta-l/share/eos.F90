@@ -71,14 +71,14 @@ implicit none
 !          dpnh_dp_i,phi_i,caller,pnh_i_out)
 
      call pnh_and_exner_from_eos3(hvcoord,vtheta_dp,dp3d,dphi,pnh,exner,&
-          dpnh_dp_i,phi_i(:,:,nlevp),caller,pnh_i_out)
+          dpnh_dp_i,phi_i(:,:,nlevp),caller,pnh_i_out,phi_i_in=phi_i)
 
   else
 !     call pnh_and_exner_from_eos2(hvcoord,vtheta_dp,dp3d,dphi,pnh,exner,&
 !          dpnh_dp_i,phi_i,'not specified',pnh_i_out)
 
      call pnh_and_exner_from_eos3(hvcoord,vtheta_dp,dp3d,dphi,pnh,exner,&
-     dpnh_dp_i,phi_i(:,:,nlevp),'not specified',pnh_i_out)
+     dpnh_dp_i,phi_i(:,:,nlevp),'not specified',pnh_i_out,phi_i_in=phi_i)
 
   endif
   end subroutine pnh_and_exner_from_eos
@@ -129,11 +129,11 @@ implicit none
   r0=rearth
 
   rheighti = phi_i/g + r0
-  rheightm(:,:,1:nlev) = (rheighti(:,:,1:nlev) + rheighti(:,:,2:nlevp))/2.0
+  rheightm(:,:,1:nlev) = (rheighti(:,:,1:nlev) + rheighti(:,:,2:nlevp))/2.0_real_kind
   rhati = rheighti/r0 ! r/r0
   rhatm = rheightm/r0
-  invrhatm = 1.0/rhatm
-  invrhati = 1.0/rhati
+  invrhatm = 1.0_real_kind/rhatm
+  invrhati = 1.0_real_kind/rhati
 
   ! check for bad state that will crash exponential function below
   if (theta_hydrostatic_mode) then
@@ -212,7 +212,11 @@ print *, 'phi_i', phi_i(1,1,:)
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!  
 
 !!!!!
-   pnh_i(:,:,1) = hvcoord%hyai(1)*hvcoord%ps0*invrhati(:,:,1)*invrhati(:,:,1)  ! hydrostatic ptop/rhat^2
+   pnh_i(:,:,1) = hvcoord%hyai(1)*hvcoord%ps0  ! hydrostatic ptop/rhat^2
+
+# ifdef DA
+   pnh_i(:,:,1) = pnh_i(:,:,1) * invrhati(:,:,1)*invrhati(:,:,1)
+#endif 
 
    ! surface boundary condition pnh_i determined by w equation to enforce
    ! w b.c.  This is computed in the RHS calculation.  Here, we use
@@ -351,7 +355,7 @@ print *, 'phi_i', phi_i(1,1,:)
 
 !uses phis as input, reconstructs phi from dphi and phis
 subroutine pnh_and_exner_from_eos3(hvcoord,vtheta_dp,dp3d,dphi,pnh,exner,&
-     dpnh_dp_i,phis,caller,pnh_i_out,p_exner)
+     dpnh_dp_i,phis,caller,pnh_i_out,p_exner,phi_i_in)
 implicit none
 !
 ! Use Equation of State to compute exner pressure, nh presure
@@ -376,6 +380,7 @@ implicit none
   real (kind=real_kind), intent(out) :: exner(np,np,nlev)      ! exner nh pressure
   real (kind=real_kind), intent(in)  :: phis(np,np)
   character(len=*),      intent(in)  :: caller       ! name for error
+  real (kind=real_kind), intent(in), optional :: phi_i_in(np,np,nlevp)  ! pnh on interfaces
   real (kind=real_kind), intent(out), optional :: pnh_i_out(np,np,nlevp)  ! pnh on interfaces
   real (kind=real_kind), intent(inout), optional :: p_exner(np,np,nlev) 
 
@@ -393,27 +398,43 @@ implicit none
 
   real (kind=real_kind) ::  rheighti(np,np,nlevp), rheightm(np,np,nlev), rhatm(np,np,nlev), r0
   real (kind=real_kind) ::  rhati(np,np,nlevp), invrhatm(np,np,nlev), invrhati(np,np,nlevp), &
-                            newrhatsquared(np,np,nlev)
+                            newrhatsquared(np,np,nlev), rhatkp1_bfb(np,np,nlev)
 
   !construct phi_i here
+  if(present(phi_i_in))then
+        phi_i = phi_i_in
+  else
   phi_i(:,:,nlevp) = phis(:,:)
   do k=nlev,1,-1
     phi_i(:,:,k) = phi_i(:,:,k+1) - dphi(:,:,k)
   enddo
+  end if
 
   r0=rearth
 
   rheighti = phi_i/g + r0
-  rheightm(:,:,1:nlev) = (rheighti(:,:,1:nlev) + rheighti(:,:,2:nlevp))/2.0
+
+  rheightm(:,:,1:nlev) = (rheighti(:,:,1:nlev) + rheighti(:,:,2:nlevp))/2.0_real_kind
   rhati = rheighti/r0 ! r/r0
   rhatm = rheightm/r0
-  invrhatm = 1.0/rhatm
-  invrhati = 1.0/rhati
+  invrhatm = 1.0_real_kind/rhatm
+  invrhati = 1.0_real_kind/rhati
+#ifdef HOMMEXX_BFB_TESTING
+  rhatkp1_bfb = ((phi_i(:,:,1:nlev) +dphi)/g + r0)/r0
+#else
+  rhatkp1_bfb = rhati(:,:,2:nlevp)
+#endif
 
   newrhatsquared = (rhati(:,:,1:nlev)*rhati(:,:,1:nlev)   + &
-                    rhati(:,:,2:nlevp)*rhati(:,:,2:nlevp) + &
-                    rhati(:,:,1:nlev)*rhati(:,:,2:nlevp))/3.0
+                    rhatkp1_bfb*rhatkp1_bfb + &
+                    rhati(:,:,1:nlev)*rhatkp1_bfb)/3.0_real_kind
+  !newrhatsquared = 1.0 !rhati(:,:,2:nlevp)
 
+
+
+
+
+ 
   ! check for bad state that will crash exponential function below
   if (theta_hydrostatic_mode) then
     ierr= any(dp3d(:,:,:) < 0 )
@@ -476,7 +497,6 @@ print *, 'phi_i', phi_i(1,1,:)
 
      !da
 #ifdef DA
-     !p_over_exner(:,:,k) = p_over_exner(:,:,k)*invrhatm(:,:,k)*invrhatm(:,:,k)
      p_over_exner(:,:,k) = p_over_exner(:,:,k)/newrhatsquared(:,:,k)
 
 !print *, 'newrhatsq', newrhatsquared(1,1,k)
@@ -497,8 +517,10 @@ print *, 'phi_i', phi_i(1,1,:)
    p_exner(:,:,:) = p_over_exner(:,:,:)
    endif
 !!!!!
-   pnh_i(:,:,1) = hvcoord%hyai(1)*hvcoord%ps0*invrhati(:,:,1)*invrhati(:,:,1)  ! hydrostatic ptop/rhat^2
-
+   pnh_i(:,:,1) = hvcoord%hyai(1)*hvcoord%ps0  ! hydrostatic ptop/rhat^2
+# ifdef DA
+   pnh_i(:,:,1) = pnh_i(:,:,1) * (invrhati(:,:,1)*invrhati(:,:,1))
+# endif
    ! surface boundary condition pnh_i determined by w equation to enforce
    ! w b.c.  This is computed in the RHS calculation.  Here, we use
    ! an approximation (hydrostatic) so that dpnh/dpi = 1
@@ -529,7 +551,7 @@ print *, 'phi_i', phi_i(1,1,:)
 #ifdef DA
    !da
    !keep the bottom val unchanged and set to 1
-   dpnh_dp_i(:,:,1:nlev) = dpnh_dp_i(:,:,1:nlev)*rhati(:,:,1:nlev)*rhati(:,:,1:nlev)
+   dpnh_dp_i(:,:,1:nlev) = dpnh_dp_i(:,:,1:nlev) *rhati(:,:,1:nlev)*rhati(:,:,1:nlev)
 #endif   
 
    if (present(pnh_i_out)) then

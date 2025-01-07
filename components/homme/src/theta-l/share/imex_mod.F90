@@ -10,7 +10,7 @@ module imex_mod
   use element_mod,        only: element_t
   use derivative_mod,     only: derivative_t
   use time_mod,           only: timelevel_t, timelevel_qdp
-  use physical_constants, only: g, kappa
+  use physical_constants, only: g, kappa, rearth
   use eos,                only: pnh_and_exner_from_eos, pnh_and_exner_from_eos3, phi_from_eos
   use element_state,      only: max_itercnt, max_deltaerr, max_reserr
   use control_mod,        only: theta_hydrostatic_mode, qsplit
@@ -151,9 +151,10 @@ contains
        return
     endif
 
+
        
     ! dirk settings
-    maxiter=100
+    maxiter=20
 #ifdef HOMMEXX_BFB_TESTING
     deltatol=1.0e-6_real_kind ! In BFB testing we can't converge due to calls of zeroulp
 #else
@@ -181,7 +182,7 @@ contains
                elem(ie)%state%dp3d(:,:,:,nt),elem(ie)%state%phinh_i(:,:,:,nt),pnh,   &
                exner,dpnh_dp_i,caller='dirkn0')
           w_n0(:,:,1:nlev)     = w_n0(:,:,1:nlev) + &
-               dt3*g*(dpnh_dp_i(:,:,1:nlev)-1)
+               dt3*g*(dpnh_dp_i(:,:,1:nlev)-1) 
 
           call compute_gwphis(gwh_i,elem(ie)%state%dp3d(:,:,:,nt),elem(ie)%state%v(:,:,:,:,nt),&
                elem(ie)%derived%gradphis,hvcoord)
@@ -225,6 +226,7 @@ contains
        phi_np1(:,:,1:nlev) =  phi_n0(:,:,1:nlev) +  dt2*g*w_np1(:,:,1:nlev)
 #endif
 #if 1
+       ! Quite bad on small planets with DA!
        ! use hydrostatic for initial guess
        call phi_from_eos(hvcoord,elem(ie)%state%phis,elem(ie)%state%vtheta_dp(:,:,:,np1),&
             elem(ie)%state%dp3d(:,:,:,np1),phi_np1)
@@ -261,7 +263,7 @@ contains
        endif
 
        call pnh_and_exner_from_eos3(hvcoord,elem(ie)%state%vtheta_dp(:,:,:,np1),elem(ie)%state%dp3d(:,:,:,np1),&
-            dphi,pnh,exner,dpnh_dp_i,elem(ie)%state%phis,'dirk1')
+            dphi,pnh,exner,dpnh_dp_i,elem(ie)%state%phis,'dirk1',phi_i_in=phi_np1)
        Fn(:,:,1:nlev) = w_np1(:,:,1:nlev) - &
             (w_n0(:,:,1:nlev) + g*dt2 * (dpnh_dp_i(:,:,1:nlev)-1))
 
@@ -276,7 +278,11 @@ call t_stopf('get_dirk_jacobian_num')
 
 call t_startf('get_dirk_jacobian_analyt')
           ! analytic J:
+#ifdef DA
+          call get_dirk_jacobian_deep(JacL,JacD,JacU,dt2,elem(ie)%state%dp3d(:,:,:,np1),dphi,elem(ie)%state%phis,pnh,1) 
+#else
           call get_dirk_jacobian(JacL,JacD,JacU,dt2,elem(ie)%state%dp3d(:,:,:,np1),dphi,elem(ie)%state%phis,pnh,1) 
+# endif
 call t_stopf('get_dirk_jacobian_analyt')
 
           x(:,:,1:nlev) = -Fn(:,:,1:nlev)
@@ -481,6 +487,168 @@ call t_stopf('dirk_iteration')
       end do
     end if
   end subroutine get_dirk_jacobian
+  
+  subroutine get_dirk_jacobian_deep(JacL,JacD,JacU,dt2,dp3d,dphi,phis,pnh,exact,&
+     epsie,hvcoord,dpnh_dp_i,vtheta_dp)
+  !================================================================================
+  ! compute Jacobian of F(phi) = sum(dphi) +const + (dt*g)^2 *(1-dp/dpi) column wise
+  ! with respect to phi
+  !
+  ! This subroutine forms the tridiagonal analytic Jacobian (we actually form the diagonal, sub-, and super-diagonal)
+  ! J for use in a LApack tridiagonal LU factorization and solver to solve  J * x = -f either exactly or
+  ! approximately
+  !
+  !  input:  
+  !  exact jacobian:        dphi, dp3d, pnh
+  !  matrix free jacobian:  dphi, dp3d, vtheta_dp, hvcoord, dpnh_dp_i
+  !
+  ! epsie == 1 means exact Jacobian, epsie ~= 1 means finite difference approximate jacobian
+  ! exact,epsie,hvcoord,dpnh_dp,vtheta_dp,pnh,exner,exner_i are only needed as inputs
+  ! if epsie ~=1
+  !  
+  ! The rule-of-thumb optimal epsie  is epsie = norm(elem)*sqrt(macheps)
+  !
+  !===================================================================================
+    real (kind=real_kind), intent(out) :: JacD(np,np,nlev)
+    real (kind=real_kind), intent(out) :: JacL(np,np,nlev-1),JacU(np,np,nlev-1)
+    real (kind=real_kind), intent(in)  :: dp3d(np,np,nlev)
+    real (kind=real_kind), intent(inout) :: pnh(np,np,nlev)
+    real (kind=real_kind), intent(in)  :: dphi(np,np,nlev)
+    real (kind=real_kind), intent(in)  :: phis(np,np)
+    real (kind=real_kind), intent(in)  :: dt2
+
+    real (kind=real_kind), intent(in), optional :: epsie ! epsie is the differencing size in the approx. Jacobian
+    real (kind=real_kind), intent(in), optional :: dpnh_dp_i(np,np,nlevp)
+    real (kind=real_kind), intent(in), optional :: vtheta_dp(np,np,nlev)
+    type (hvcoord_t)     , intent(in), optional    :: hvcoord
+
+    integer, intent(in) :: exact
+
+    ! local
+    real (kind=real_kind) :: alpha1(np,np),alpha2(np,np)
+    real (kind=real_kind) :: e(np,np,nlev),dphi_temp(np,np,nlev),exner(np,np,nlev),phi_i(np,np,nlevp)
+    real (kind=real_kind) :: dpnh2(np,np,nlev),dpnh_dp_i_epsie(np,np,nlevp)
+    real (kind=real_kind) :: ds(np,np,nlev),delta_mu(np,np,nlevp),r_hat_full(np,np,nlevp)
+    real (kind=real_kind) :: a(np,np),b(np,np),ck(np,np),ckm1(np,np), r_hat(np,np),d(np,np),f(np,np),q(np,np),rhatsq_m1(np,np),rhatsq_p1(np,np), dprime(np,np), fprime(np,np)
+    integer :: k,l,k2
+    if (exact.eq.1) then ! use exact JacobianA
+
+       ! this code will need to change when the equation of state is changed.
+       ! add special cases for k==1 and k==nlev+1
+       phi_i(:,:,nlevp) = phis
+       do k=nlev,1,-1
+         phi_i(:,:,k) = phi_i(:,:,k+1)-dphi(:,:,k)
+       end do
+       k  = 1 ! Jacobian row 1
+       r_hat = (rearth + phi_i(:,:, k)/g)/rearth ! DA_CHANGE
+       rhatsq_m1 = ((phi_i(:,:,k)/g + rearth)**2 + (phi_i(:,:,k+1)/g + rearth)**2 + (phi_i(:,:,k)/g + rearth)*(phi_i(:,:,k+1)/g+rearth)) /(3_real_kind * rearth**2)
+       q = (dt2)**2 * 2_real_kind/(dp3d(:,:,k)) * (pnh(:,:,k)) * 2_real_kind*((rearth * g + phi_i(:,:,k))/(rearth)**2)
+       a  = (dt2*g)**2/(1-kappa) ! DA_CHANGE
+       b  =  a/dp3d(:,:,k)
+       fprime = dphi(:,:,k) *  (3_real_kind*rearth*g +  phi_i(:,:,k) + 2_real_kind*phi_i(:,:,k+1))/(3_real_kind*(rearth*g)**2)
+       f = -dphi(:,:,k) *  (3_real_kind*rearth*g + 2_real_kind * phi_i(:,:,k) + phi_i(:,:,k+1))/(3_real_kind*(rearth*g)**2)
+       ck = pnh(:,:,k)/dphi(:,:,k)
+
+       JacU(:,:,k) =  2*b*ck*r_hat*r_hat  
+
+       JacD(:,:,k) = 1 - q -  JacU(:,:,k) * (f + rhatsq_m1)/rhatsq_m1 
+
+       JacU(:,:,k  ) = JacU(:,:,k  ) *  (fprime + rhatsq_m1)/rhatsq_m1
+       ckm1 = ck
+       do k = 2,nlev-1 ! Jacobian row k
+          r_hat =  (rearth + phi_i(:,:, k)/g)/rearth ! DA_CHANGE
+          rhatsq_p1 = ((phi_i(:,:,k)/g + rearth)**2 + (phi_i(:,:,k+1)/g + rearth)**2 + (phi_i(:,:,k)/g + rearth) *(phi_i(:,:,k+1)/g+rearth)) /(3_real_kind * rearth**2)
+          q = (dt2)**2*  2_real_kind/(dp3d(:,:,k-1) + dp3d(:,:,k)) * (pnh(:,:,k)-pnh(:,:,k-1)) * 2_real_kind*((rearth * g + phi_i(:,:,k))/(rearth)**2)
+          dprime = f
+          d = fprime
+          fprime = dphi(:,:,k) *  (3_real_kind*rearth*g + phi_i(:,:,k) + 2_real_kind*phi_i(:,:,k+1))/(3_real_kind*(rearth*g)**2)
+          f = -dphi(:,:,k) *  (3_real_kind*rearth*g + 2_real_kind * phi_i(:,:,k) + phi_i(:,:,k+1))/(3_real_kind*(rearth*g)**2)
+ 
+          b  = 2*a/(dp3d(:,:,k-1) + dp3d(:,:,k))
+          ck = pnh(:,:,k)/dphi(:,:,k)
+
+          JacL(:,:,k-1) = b*ckm1 *r_hat(:,:)**2
+
+          JacU(:,:,k  ) = b*ck * r_hat(:,:)**2
+
+          JacD(:,:,k  ) = 1 - q -  JacL(:,:,k-1) * (d + rhatsq_m1)/rhatsq_m1 -  JacU(:,:,k) * (f + rhatsq_p1)/rhatsq_p1
+          JacD(:,:,k  ) = 1 - q -  JacL(:,:,k-1) * (d + rhatsq_m1)/rhatsq_m1 -  JacU(:,:,k) * (f + rhatsq_p1)/rhatsq_p1
+
+          JacL(:,:,k-1) = JacL(:,:,k-1) * (dprime + rhatsq_m1)/rhatsq_m1
+
+          JacU(:,:,k  ) = JacU(:,:,k  ) *  (fprime + rhatsq_p1)/rhatsq_p1
+          ckm1 = ck
+          rhatsq_m1 = rhatsq_p1
+       end do
+
+       k  = nlev ! Jacobian row nlev
+       r_hat(:,:) = (rearth + phi_i(:,:, k)/g)/rearth !DA_CHANGE
+       rhatsq_p1 = ((phi_i(:,:,k)/g + rearth)**2 + (phi_i(:,:,k+1)/g + rearth)**2 + (phi_i(:,:,k)/g + rearth) * (phi_i(:,:,k+1)/g+rearth)) /(3 * rearth**2)
+       q = (dt2)**2 * 2/(dp3d(:,:,k-1) + dp3d(:,:,k)) * (pnh(:,:,k)-pnh(:,:,k-1)) * 2*((rearth * g + phi_i(:,:,k))/(rearth)**2)
+       dprime = f
+       d = fprime
+ 
+       f = -dphi(:,:,k) *  (3*rearth*g + 2 * phi_i(:,:,k) + phi_i(:,:,k+1))/(3*(rearth*g)**2)
+       a  = (dt2*g)**2/(1-kappa) !DA_CHANGE
+       b  = 2*a/(dp3d(:,:,k) + dp3d(:,:,k-1))
+       ck = pnh(:,:,k)/dphi(:,:,k)
+
+       JacL(:,:,k-1) = b*ckm1  * r_hat(:,:)**2
+
+       JacD(:,:,k  ) = 1 - q - JacL(:,:,k-1) * (d + rhatsq_m1)/rhatsq_m1 - r_hat(:,:)**2 * b*ck * (f + rhatsq_p1)/rhatsq_p1
+       JacD(:,:,k  ) = 1 - q - JacL(:,:,k-1) * (d+rhatsq_m1)/rhatsq_m1  -  r_hat(:,:)**2 * b*ck * (f + rhatsq_p1)/rhatsq_p1
+
+       JacL(:,:,k-1) = JacL(:,:,k-1) * (dprime + rhatsq_m1)/rhatsq_m1
+
+    else ! use finite difference approximation to Jacobian with differencing size espie
+      ! compute Jacobian of F(dphi) = phi +const + (dt*g)^2 *(1-dp/dpi) column wise
+      ! if NEWTON_DPHI is defined, compute Jacobian of:
+      !                   dF(dphi) = dphi +const + (dt*g)^2 *d(1-dp/dpi) 
+      ! we only form the tridagonal entries and this code can easily be modified to
+      ! accomodate sparse non-tridigonal and dense Jacobians, however, testing only
+      ! the tridiagonal of a Jacobian is probably sufficient for testing purpose
+       phi_i(:,:,nlevp) = phis
+       do k=nlev,1,-1
+         phi_i(:,:,k) = phi_i(:,:,k+1)-dphi(:,:,k)
+       end do
+ 
+      do k=1,nlev
+        e=0
+        e(:,:,k)=1
+        dphi_temp(:,:,:) = dphi(:,:,:)
+        ! dphi_tmp(k)= ( phi(k+1)-(phi(k)+eps ) = dphi(k)-eps
+        ! dphi_tmp(k-1)= ( phi(k)+eps-(phi(k-1) ) = dphi(k-1)+eps
+        dphi_temp(:,:,k) = dphi(:,:,k) - epsie*e(:,:,k)
+        if (k>1) dphi_temp(:,:,k-1) = dphi(:,:,k-1) + epsie*e(:,:,k)
+
+        if (theta_hydrostatic_mode) then
+           !dpnh_dp_i_epsie(:,:,:)=1.d0
+           delta_mu=0
+        else
+           do k2=nlev,1,-1  ! scan
+              phi_i(:,:,k2) = phi_i(:,:,k2+1)-dphi_temp(:,:,k2)
+           enddo
+           call pnh_and_exner_from_eos3(hvcoord,vtheta_dp,dp3d,dphi_temp,pnh,exner,dpnh_dp_i_epsie,phis,'get_dirk_jacobian') 
+           delta_mu(:,:,:)= (g*dt2)**2*(dpnh_dp_i(:,:,:)-dpnh_dp_i_epsie(:,:,:))/epsie ! DA_CHANGE
+        end if
+
+        JacD(:,:,k) = 1 +  delta_mu(:,:,k)
+        if (k.eq.1) then
+           JacL(:,:,k) =   delta_mu(:,:,k+1)
+        elseif (k.eq.nlev) then
+           JacU(:,:,k-1) = delta_mu(:,:,k-1)
+        else
+           JacL(:,:,k)   = delta_mu(:,:,k+1)
+           JacU(:,:,k-1) = delta_mu(:,:,k-1)
+        end if
+
+      end do
+    end if
+    end subroutine get_dirk_jacobian_deep
+
+
+
+ 
 
   subroutine test_imex_jacobian(elem,hybrid,hvcoord,tl,nets,nete)
     ! the following code compares the analytic vs exact imex Jacobian
@@ -505,26 +673,28 @@ call t_stopf('dirk_iteration')
     real (kind=real_kind) :: pnh(np,np,nlev), pnh_i(np,np,nlevp)
     real (kind=real_kind) :: norminfJ0(np,np)
 
-    real (kind=real_kind) :: dt,epsie,jacerrorvec(6),minjacerr
-    integer :: k,ie,i,j
+    real (kind=real_kind) :: dt,epsie,jacerrorvec(6),minjacerr,leverr(6,nlev),minerr(nlev)
+    integer :: k,ie,i,j,q
     minjacerr=0
+    minerr=0
     if (hybrid%masterthread) write(iulog,*)'Running IMEX Jacobian unit test...'
     do ie=nets,nete
 
-print *, 'IN IMEX my ie is ', ie
 
        dp3d(:,:,:) = elem(ie)%state%dp3d(:,:,:,tl%n0)
        vtheta_dp(:,:,:) = elem(ie)%state%vtheta_dp(:,:,:,tl%n0)
        phi_i(:,:,:)         = elem(ie)%state%phinh_i(:,:,:,tl%n0)
        phis(:,:)          = elem(ie)%state%phis(:,:)
-       call pnh_and_exner_from_eos(hvcoord,vtheta_dp,dp3d,phi_i,&
-               pnh,exner,dpnh_dp_i,pnh_i_out=pnh_i)
-
-       dt=100.0
-
        do k=1,nlev
           dphi(:,:,k)=phi_i(:,:,k+1)-phi_i(:,:,k)
        enddo
+ 
+       call pnh_and_exner_from_eos3(hvcoord,vtheta_dp,dp3d,dphi,pnh,exner,dpnh_dp_i,phis,'test_dirk_jacobian')
+
+
+
+       dt=100.0
+
        call get_dirk_jacobian(JacL,JacD,JacU,dt,dp3d,dphi,phis,pnh,1)
 
       ! compute infinity norm of the initial Jacobian 
@@ -545,6 +715,7 @@ print *, 'IN IMEX my ie is ', ie
       end do
 
        jacerrorvec=0
+       leverr = 0
        do j=1,6
           ! compute numerical jacobian with 5 different epsilons and take the smallest error
           ! the function that we are trying to estimate the numerical jacobian of
@@ -563,6 +734,23 @@ print *, 'IN IMEX my ie is ', ie
           enddo
           call get_dirk_jacobian(Jac2L,Jac2D,Jac2U,dt,dp3d,dphi,phis,pnh,0,&
              epsie,hvcoord,dpnh_dp_i,vtheta_dp)
+          do q=1,np
+            do i=1,np
+            do k=1,nlev
+            if (abs(JacD(i,q,k)-Jac2D(i,q,k)) > leverr(j,k)) then 
+               leverr(j, k) = abs(JacD(i,q,k)-Jac2D(i,q,k))
+            end if
+            if (k < nlev) then
+            if (abs(JacL(i,q,k)-Jac2L(i,q,k)) > leverr(j,k)) then
+              leverr(j,k) = abs(JacL(i,q,k)-Jac2L(i,q,k))
+            end if
+            if (abs(JacU(i,q,k)-Jac2U(i,q,k)) > leverr(j,k)) then
+               leverr(j,k)  =abs(JacU(i,q,k)-Jac2U(i,q,k))
+            end if
+            end if
+            end do
+            end do
+          end do
 
           if (maxval(abs(JacD(:,:,:)-Jac2D(:,:,:))) > jacerrorvec(j)) then 
              jacerrorvec(j) = maxval(abs(JacD(:,:,:)-Jac2D(:,:,:)))
@@ -573,16 +761,20 @@ print *, 'IN IMEX my ie is ', ie
           if (maxval(abs(JacU(:,:,:)-Jac2U(:,:,:))) > jacerrorvec(j)) then
              jacerrorvec(j) = maxval(abs(JacU(:,:,:)-Jac2U(:,:,:)))
           end if
+          
        end do
        minjacerr = max( minval(jacerrorvec(:))/maxval(norminfJ0)   ,minjacerr)
+       do k=1,nlev
+         minerr(k) = max(minval(leverr(:, k))/maxval(norminfJ0), minerr(k))
+       end do
        !     minjacerr = minval(jacerrorvec(:))
     end do
     if (minjacerr > 1.0e-3_real_kind) then 
-       write(iulog,*)'WARNING:  Analytic and exact Jacobian differ by ', minjacerr
+       write(iulog,*)'WARNING:  Analytic and exact Jacobian differ by ', minjacerr!, "by level: ", minerr
        write(iulog,*)'Please check that the IMEX exact Jacobian in eos.F90 is actually exact'
     else
        if (hybrid%masterthread) write(iulog,*)&
-            'PASS. max error of analytic and exact Jacobian: ',minjacerr
+            'PASS. max error of analytic and exact Jacobian: ',minjacerr!, "by level: ", minerr
     end if
 
     call test_tridiag_solver(hybrid, JacL, JacD, JacU)

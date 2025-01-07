@@ -24,6 +24,7 @@ class ElementsGeometry {
 public:
   // Coriolis term
   ExecViewManaged<Real * [NP][NP]> m_fcor;
+  ExecViewManaged<Real * [NP][NP]> m_fcorcos;
 
   // Quadrature weights and metric tensor
   ExecViewManaged<Real * [NP][NP]>        m_spheremp;
@@ -67,6 +68,7 @@ public:
   // Fill the exec space views with data coming from F90 pointers
   void set_elem_data (const int ie,
                       CF90Ptr& D, CF90Ptr& Dinv, CF90Ptr& fcor,
+                      CF90Ptr& fcorcos,
                       CF90Ptr& spheremp, CF90Ptr& rspheremp,
                       CF90Ptr& metdet, CF90Ptr& metinv,
                       CF90Ptr& tensorvisc,
