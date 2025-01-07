@@ -170,7 +170,7 @@ contains
   end subroutine init_common
 
   subroutine init_geo_views_f90 (d_ptr, dinv_ptr,        &
-                       phis_ptr, gradphis_ptr, fcor_ptr, &
+                       phis_ptr, gradphis_ptr, fcor_ptr, fcorcos_ptr, &
                        spmp_ptr, rspmp_ptr, tVisc_ptr,   &
                        sph2c_ptr,mdet_ptr,minv_ptr) bind(c)
     use dimensions_mod, only: nelemd, np
@@ -178,7 +178,7 @@ contains
     !
     ! Inputs
     !
-    type (c_ptr), intent(in) :: d_ptr, dinv_ptr, spmp_ptr, rspmp_ptr, tVisc_ptr, fcor_ptr
+    type (c_ptr), intent(in) :: d_ptr, dinv_ptr, spmp_ptr, rspmp_ptr, tVisc_ptr, fcor_ptr, fcorcos_ptr
     type (c_ptr), intent(in) :: sph2c_ptr, mdet_ptr, minv_ptr, phis_ptr, gradphis_ptr
     !
     ! Locals
@@ -230,6 +230,11 @@ contains
     do ie=1,nelemd
       scalar2d(:,:,ie) = elem(ie)%fcor
     enddo
+    call c_f_pointer(fcorcos_ptr, scalar2d, [np, np, nelemd])
+    do ie=1,nelemd
+      scalar2d(:,:,ie) = elem(ie)%fcorcosine
+    enddo
+
 
   end subroutine init_geo_views_f90
 

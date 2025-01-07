@@ -307,7 +307,7 @@ void init_functors_c ()
   hvf.init_buffers(fbm);
 }
 
-void init_elements_2d_c (const int& ie, CF90Ptr& D, CF90Ptr& Dinv, CF90Ptr& fcor,
+void init_elements_2d_c (const int& ie, CF90Ptr& D, CF90Ptr& Dinv, CF90Ptr& fcor,CF90Ptr& fcorcos,
                          CF90Ptr& spheremp, CF90Ptr& rspheremp,
                          CF90Ptr& metdet, CF90Ptr& metinv, CF90Ptr& phis,
                          CF90Ptr &tensorvisc, CF90Ptr &vec_sph2cart)
@@ -316,7 +316,7 @@ void init_elements_2d_c (const int& ie, CF90Ptr& D, CF90Ptr& Dinv, CF90Ptr& fcor
   const SimulationParams& params = Context::singleton().get<SimulationParams>();
 
   const bool consthv = (params.hypervis_scaling==0.0);
-  e.m_geometry.set_elem_data(ie,D,Dinv,fcor,spheremp,rspheremp,metdet,metinv,tensorvisc,vec_sph2cart,consthv);
+  e.m_geometry.set_elem_data(ie,D,Dinv,fcor,fcorcos,spheremp,rspheremp,metdet,metinv,tensorvisc,vec_sph2cart,consthv);
   e.m_geometry.set_phis(ie,phis);
 }
 

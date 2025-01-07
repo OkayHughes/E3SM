@@ -31,6 +31,7 @@ void ElementsGeometry::init(const int num_elems, const bool consthv, const bool 
   
   // Coriolis force
   m_fcor = ExecViewManaged<Real * [NP][NP]>("FCOR", m_num_elems);
+  m_fcorcos = ExecViewManaged<Real * [NP][NP]>("FCOR", m_num_elems);
 
   // Mass on the sphere
   m_spheremp  = ExecViewManaged<Real * [NP][NP]>("SPHEREMP",  m_num_elems);
@@ -63,7 +64,7 @@ void ElementsGeometry::init(const int num_elems, const bool consthv, const bool 
 
 void ElementsGeometry::
 set_elem_data (const int ie,
-               CF90Ptr& D, CF90Ptr& Dinv, CF90Ptr& fcor,
+               CF90Ptr& D, CF90Ptr& Dinv, CF90Ptr& fcor,CF90Ptr& fcorcos,
                CF90Ptr& spheremp, CF90Ptr& rspheremp,
                CF90Ptr& metdet, CF90Ptr& metinv,
                CF90Ptr& tensorvisc, CF90Ptr& vec_sph2cart, const bool consthv,
@@ -83,6 +84,7 @@ set_elem_data (const int ie,
   using Tensor23ViewF90 = HostViewUnmanaged<const Real [2][3][NP][NP]>;
 
   ScalarView::HostMirror h_fcor      = Kokkos::create_mirror_view(Homme::subview(m_fcor,ie));
+  ScalarView::HostMirror h_fcorcos   = Kokkos::create_mirror_view(Homme::subview(m_fcorcos,ie));
   ScalarView::HostMirror h_metdet    = Kokkos::create_mirror_view(Homme::subview(m_metdet,ie));
   ScalarView::HostMirror h_spheremp  = Kokkos::create_mirror_view(Homme::subview(m_spheremp,ie));
   ScalarView::HostMirror h_rspheremp = Kokkos::create_mirror_view(Homme::subview(m_rspheremp,ie));
@@ -98,6 +100,7 @@ set_elem_data (const int ie,
   h_vec_sph2cart = Kokkos::create_mirror_view(Homme::subview(m_vec_sph2cart,ie));
 
   ScalarViewF90 h_fcor_f90         (fcor);
+  ScalarViewF90 h_fcorcos_f90      (fcorcos);
   ScalarViewF90 h_metdet_f90       (metdet);
   ScalarViewF90 h_spheremp_f90     (spheremp);
   ScalarViewF90 h_rspheremp_f90    (rspheremp);
@@ -111,6 +114,7 @@ set_elem_data (const int ie,
   for (int igp = 0; igp < NP; ++igp) {
     for (int jgp = 0; jgp < NP; ++jgp) {
       h_fcor      (igp, jgp) = h_fcor_f90      (igp,jgp);
+      h_fcorcos   (igp, jgp) = h_fcorcos_f90   (igp,jgp);
       h_spheremp  (igp, jgp) = h_spheremp_f90  (igp,jgp);
       h_rspheremp (igp, jgp) = h_rspheremp_f90 (igp,jgp);
       h_metdet    (igp, jgp) = h_metdet_f90    (igp,jgp);
@@ -152,6 +156,7 @@ set_elem_data (const int ie,
   }
 
   Kokkos::deep_copy(Homme::subview(m_fcor,ie), h_fcor);
+  Kokkos::deep_copy(Homme::subview(m_fcorcos,ie), h_fcorcos);
   Kokkos::deep_copy(Homme::subview(m_metinv,ie), h_metinv);
   Kokkos::deep_copy(Homme::subview(m_metdet,ie), h_metdet);
   Kokkos::deep_copy(Homme::subview(m_spheremp,ie), h_spheremp);
@@ -206,6 +211,7 @@ void ElementsGeometry::randomize(const int seed) {
   std::uniform_real_distribution<Real> random_dist(min_value, 1.0 / min_value);
 
   genRandArray(m_fcor,         engine, random_dist);
+  genRandArray(m_fcorcos,         engine, random_dist);
 
   genRandArray(m_spheremp,     engine, random_dist);
   genRandArray(m_tensorvisc,   engine, random_dist);

@@ -22,7 +22,7 @@ extern "C" {
   void init_dirk_f90(int ne, const Real* hyai, const Real* hybi, const Real* hyam,
                      const Real* hybm, Real ps0);
   void cleanup_f90();
-  void pnh_and_exner_from_eos_f90(const Real* vtheta_dp, const Real* dp3d, const Real* dphi,
+  void pnh_and_exner_from_eos_f90(const Real* vtheta_dp, const Real* dp3d, const Real* dphi, const Real* phis,
                                   Real* pnh, Real* exner, Real* dpnh_dp_i);
   void compute_gwphis_f90(Real* gwh_i, const Real* dp3d, const Real* v, const Real* gradphis);
   void tridiag_diagdom_bfb_a1x1(int n, void* dl, void* d, void* du, void* x, int real_size);
@@ -31,7 +31,7 @@ extern "C" {
   void f2c_f90(int nelem, int nlev, int nlevp, Real* dp3d, Real* w_i, Real* v,
                Real* vtheta_dp, Real* phinh_i, Real* gradphis);
   void get_dirk_jacobian_f90(Real* dl, Real* d, Real* du, Real dt, const Real* dp3d,
-                             const Real* dphi, const Real* pnh);
+                             const Real* dphi, const Real* phi_i, const Real* pnh);
   void compute_stage_value_dirk_f90(int nm1, Real alphadt_nm1, int n0, Real alphadt_n0,
                                     int np1, Real dt2);
   void phi_from_eos_f90(const Real* phis, const Real* vtheta_dp, const Real* dp, Real* phi_i);
@@ -302,15 +302,21 @@ TEST_CASE ("dirk_pieces_testing") {
     const Real dt = r.urrng(32, 64);
 
     ExecView<Scalar[NP][NP][NUM_LEV]> dp3d("dp3d"), dphi("dphi"), pnh("pnh");
+    //ExecView<Scalar[NP][NP][1]> phis("phis"); // TODO: make this properly 2d
+    ExecView<Scalar[NP][NP][NUM_LEV_P]> phi_i("phi_i");
     fill_inc(r, nlev, 5, 10000, dp3d);
     fill_mid(r, nlev, 5, 10000, pnh);
+    fill_inc(r, nlev+1, 5, 1000, phi_i);
     fill_inc(r, nlev, 500000, 100, dphi);
+    //fill_inc(r, 1, 5, 10000, phis);
 
     const auto w = d1.m_work;
     const auto
       dp3dw = dfi::get_work_slot(w, 0, 0),
       dphiw = dfi::get_work_slot(w, 0, 1),
-      pnhw  = dfi::get_work_slot(w, 0, 2);
+      pnhw  = dfi::get_work_slot(w, 0, 2),
+      phi_iw  = dfi::get_work_slot(w, 0, 3),
+      wrk  = dfi::get_work_slot(w, 0, 4);
     const auto ls = d1.m_ls;
     const auto
       dl = dfi::get_ls_slot(ls, 0, 0),
@@ -322,20 +328,33 @@ TEST_CASE ("dirk_pieces_testing") {
       dfi::transpose(kv, nlev, dp3d, dp3dw);
       dfi::transpose(kv, nlev, dphi, dphiw);
       dfi::transpose(kv, nlev, pnh, pnhw);
+      dfi::transpose(kv, nlev+1, phi_i, phi_iw);
       kv.team_barrier();
+      dfi::scan_dphi(kv, nlev+1,  dfi::npack, wrk, dphiw, phi_iw);
+      kv.team_barrier();
+      dfi::transpose(kv, nlev+1, phi_iw, phi_i);
+      kv.team_barrier();
+#ifdef HOMMEDA
+      dfi::calc_jacobian_deep(kv, dt, dp3dw, phi_iw, dphiw, pnhw, dl, d, du);
+# else
       dfi::calc_jacobian(kv, dt, dp3dw, dphiw, pnhw, dl, d, du);
+# endif
     };
     parallel_for(d1.m_policy, f1); fence();
+    const auto all = Kokkos::ALL();
+    const auto phis = subview(phi_i, all, all, std::make_pair(NUM_LEV, NUM_LEV+1));
 
     const auto dlm = cmvdc(dl), dm = cmvdc(d), dum = cmvdc(du);
 
     FA3 dp3df("dp3df", nlev), dphif("dphif", nlev), pnhf("pnhf", nlev);
+    FA3 phi_if("phi_if", nlev+1);
     FA3 dlf("dlf", nlev-1), df("df", nlev), duf("duf", nlev-1);
     c2f(dp3d, dp3df);
     c2f(dphi, dphif);
+    c2f(phi_i, phi_if);
     c2f(pnh, pnhf);
     get_dirk_jacobian_f90(dlf.data(), df.data(), duf.data(), dt,
-                          dp3df.data(), dphif.data(), pnhf.data());
+                          dp3df.data(), dphif.data(), phi_if.data(), pnhf.data());
 
     const auto eq = [&] (const decltype(dm)& dc, const int os, const FA3& df,
                          const int n) {
@@ -347,6 +366,7 @@ TEST_CASE ("dirk_pieces_testing") {
           si = idx % dfi::packn;
           for (int k = 0; k < n; ++k)
             REQUIRE(equal(dc(k+os,pi)[si], df(k,i,j), 1e3*eps));
+            
         }
     };
     eq(dlm, 1, dlf, nlev-1); eq(dm, 0, df, nlev); eq(dum, 0, duf, nlev-1);
@@ -432,8 +452,10 @@ TEST_CASE ("dirk_pieces_testing") {
     const int nlev = NUM_PHYSICAL_LEV, np = NP;
 
     ExecView<Scalar[NP][NP][NUM_LEV]> dp3d("dp3d"), dphi("dphi"), vtheta_dp("vtheta_dp");
+    ExecView<Scalar[NP][NP][NUM_LEV_P]> phi_i("phi_i");
     fill_inc(r, nlev, 5, 10000, dp3d);
     fill_inc(r, nlev, 500000, 100, dphi);
+    fill_inc(r, nlev+1, 5, 1000, phi_i);
     fill_inc(r, nlev, 5*300, 10000*300, vtheta_dp);
 
     const auto w = d1.m_work;
@@ -443,27 +465,34 @@ TEST_CASE ("dirk_pieces_testing") {
       vtheta_dpw = dfi::get_work_slot(w, 0, 2),
       pnhw = dfi::get_work_slot(w, 0, 3),
       exnerw = dfi::get_work_slot(w, 0, 4),
-      dpnh_dp_iw = dfi::get_work_slot(w, 0, 5);
+      dpnh_dp_iw = dfi::get_work_slot(w, 0, 5),
+      phi_iw = dfi::get_work_slot(w, 0, 6),
+      wrk = dfi::get_work_slot(w, 0, 7);
 
     const auto f = KOKKOS_LAMBDA(const dfi::MT& t) {
       KernelVariables kv(t);
       dfi::transpose(kv, nlev, vtheta_dp, vtheta_dpw);
       dfi::transpose(kv, nlev, dp3d, dp3dw);
       dfi::transpose(kv, nlev, dphi, dphiw);
-      kv.team_barrier();
-      dfi::pnh_and_exner_from_eos(kv, hvcoord, vtheta_dpw, dp3dw, dphiw,
+      dfi::transpose(kv, nlev+1, phi_i, phi_iw);
+      dfi::scan_dphi(kv, nlev+1,  dfi::npack, wrk, dphiw, phi_iw);
+      
+      dfi::pnh_and_exner_from_eos(kv, hvcoord, vtheta_dpw, dp3dw, dphiw, phi_iw,
                                   pnhw, exnerw, dpnh_dp_iw);
+ 
+      dfi::transpose(kv, nlev+1, phi_iw, phi_i);
     };
     parallel_for(d1.m_policy, f); fence();
     
     const auto dpnh_dp_im = cmvdc(dpnh_dp_iw);
 
-    FA3 dp3df("dp3df", nlev), dphif("dphif", nlev), vtheta_dpf("vtheta_dpf", nlev),
+    FA3 dp3df("dp3df", nlev), dphif("dphif", nlev), phi_if("phi_if", nlev+1), vtheta_dpf("vtheta_dpf", nlev),
       pnhf("pnhf", nlev), exnerf("exner", nlev), dpnh_dp_if("dpnh_dp_if", nlev+1);
     c2f(dp3d, dp3df);
     c2f(dphi, dphif);
+    c2f(phi_i, phi_if);
     c2f(vtheta_dp, vtheta_dpf);
-    pnh_and_exner_from_eos_f90(vtheta_dpf.data(), dp3df.data(), dphif.data(),
+    pnh_and_exner_from_eos_f90(vtheta_dpf.data(), dp3df.data(), dphif.data(), phi_if.data(),
                                pnhf.data(), exnerf.data(), dpnh_dp_if.data());
 
     for (int i = 0; i < np; ++i)
@@ -473,7 +502,7 @@ TEST_CASE ("dirk_pieces_testing") {
           pi = idx / dfi::packn,
           si = idx % dfi::packn;
         for (int k = 0; k < nlev; ++k)
-          REQUIRE(equal(dpnh_dp_im(k,pi)[si], dpnh_dp_if(k,i,j), 1e2*eps));
+                  REQUIRE(equal(dpnh_dp_im(k,pi)[si], dpnh_dp_if(k,i,j), 1e2*eps));
       }
   }
 

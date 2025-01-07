@@ -23,7 +23,7 @@ void init_caar_f90 (const int& ne,
                const Real& ps0);
 void init_geo_views_f90 (Real*& d_ptr,Real*& dinv_ptr,
                const Real*& phis_ptr, const Real*& gradphis_ptr,
-               Real*& fcor_ptr,
+               Real*& fcor_ptr, Real*& fcorcos_ptr,
                Real*& sphmp_ptr, Real*& rspmp_ptr,
                Real*& tVisc_ptr, Real*& sph2c_ptr,
                Real*& metdet_ptr, Real*& metinv_ptr);
@@ -127,6 +127,7 @@ TEST_CASE("caar", "caar_testing") {
   auto phis     = Kokkos::create_mirror_view(geo.m_phis);
   auto gradphis = Kokkos::create_mirror_view(geo.m_gradphis);
   auto fcor     = Kokkos::create_mirror_view(geo.m_fcor);
+  auto fcorcos     = Kokkos::create_mirror_view(geo.m_fcorcos);
   auto spmp     = Kokkos::create_mirror_view(geo.m_spheremp);
   auto rspmp    = Kokkos::create_mirror_view(geo.m_rspheremp);
   auto tVisc    = Kokkos::create_mirror_view(geo.m_tensorvisc);
@@ -147,9 +148,10 @@ TEST_CASE("caar", "caar_testing") {
   const Real* phis_ptr     = phis.data();
   const Real* gradphis_ptr = gradphis.data();
   Real* fcor_ptr     = fcor.data();
+  Real* fcorcos_ptr     = fcorcos.data();
 
   // Get the f90 values for geometric views.
-  init_geo_views_f90(d_ptr,dinv_ptr,phis_ptr,gradphis_ptr,fcor_ptr,
+  init_geo_views_f90(d_ptr,dinv_ptr,phis_ptr,gradphis_ptr,fcor_ptr,fcorcos_ptr,
                      spmp_ptr,rspmp_ptr,tVisc_ptr,
                      sph2c_ptr,mdet_ptr,minv_ptr);
 
@@ -162,6 +164,7 @@ TEST_CASE("caar", "caar_testing") {
   Kokkos::deep_copy(geo.m_metdet,mdet);
   Kokkos::deep_copy(geo.m_metinv,minv);
   Kokkos::deep_copy(geo.m_fcor,fcor);
+  Kokkos::deep_copy(geo.m_fcorcos,fcorcos);
 
   // Get or create and init other structures needed by HVF
   auto& bm = c.create<MpiBuffersManager>();

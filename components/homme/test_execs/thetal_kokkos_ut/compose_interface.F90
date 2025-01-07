@@ -76,12 +76,12 @@ contains
     use sl_advection, only: sphere2cart
     use theta_f2c_mod, only: init_elements_2d_c, init_geopotential_c
 
-    real (real_kind), target, dimension(np,np)     :: elem_mp, elem_fcor, elem_spheremp, &
+    real (real_kind), target, dimension(np,np)     :: elem_mp, elem_fcor,elem_fcorcos, elem_spheremp, &
          elem_rspheremp, elem_metdet, elem_state_phis
     real (real_kind), target, dimension(np,np,2)   :: elem_gradphis
     real (real_kind), target, dimension(np,np,2,2) :: elem_D, elem_Dinv, elem_metinv, elem_tensorvisc
     real (real_kind), target, dimension(np,np,3,2) :: elem_vec_sph2cart
-    type (c_ptr) :: elem_D_ptr, elem_Dinv_ptr, elem_fcor_ptr, elem_spheremp_ptr, &
+    type (c_ptr) :: elem_D_ptr, elem_Dinv_ptr, elem_fcor_ptr, elem_fcorcos_ptr, elem_spheremp_ptr, &
          elem_rspheremp_ptr, elem_metdet_ptr, elem_metinv_ptr, elem_tensorvisc_ptr, &
          elem_vec_sph2cart_ptr, elem_state_phis_ptr, elem_gradphis_ptr
 
@@ -93,6 +93,7 @@ contains
     elem_D_ptr            = c_loc(elem_D)
     elem_Dinv_ptr         = c_loc(elem_Dinv)
     elem_fcor_ptr         = c_loc(elem_fcor)
+    elem_fcorcos_ptr         = c_loc(elem_fcorcos)
     elem_spheremp_ptr     = c_loc(elem_spheremp)
     elem_rspheremp_ptr    = c_loc(elem_rspheremp)
     elem_metdet_ptr       = c_loc(elem_metdet)
@@ -104,7 +105,7 @@ contains
     do ie = 1,nelemd
       elem_D            = elem(ie)%D
       elem_Dinv         = elem(ie)%Dinv
-      elem_fcor         = elem(ie)%fcor
+      elem_fcorcos         = elem(ie)%fcorcosine
       elem_spheremp     = elem(ie)%spheremp
       elem_rspheremp    = elem(ie)%rspheremp
       elem_metdet       = elem(ie)%metdet
@@ -123,7 +124,7 @@ contains
             sphere_latlon_vec(2,i,j) = elem(ie)%spherep(i,j)%lon
          end do
       end do
-      call init_elements_2d_c(ie-1, elem_D_ptr, elem_Dinv_ptr, elem_fcor_ptr, &
+      call init_elements_2d_c(ie-1, elem_D_ptr, elem_Dinv_ptr, elem_fcor_ptr, elem_fcorcos_ptr, &
            elem_spheremp_ptr, elem_rspheremp_ptr, elem_metdet_ptr, elem_metinv_ptr, &
            elem_tensorvisc_ptr, elem_vec_sph2cart_ptr, sphere_cart_vec, &
            sphere_latlon_vec)

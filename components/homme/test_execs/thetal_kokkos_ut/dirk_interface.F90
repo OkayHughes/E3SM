@@ -24,7 +24,7 @@ contains
     call initEdgeBuffer(par, edge_g, elem, 6*nlev+1)
   end subroutine init_dirk_f90
 
-  subroutine pnh_and_exner_from_eos_f90(vtheta_dp,dp3d,dphi,pnh,exner,dpnh_dp_i) bind(c)
+  subroutine pnh_and_exner_from_eos_f90(vtheta_dp,dp3d,dphi,phi_i,pnh,exner,dpnh_dp_i) bind(c)
     use dimensions_mod,        only: nlev, nlevp, np
     use thetal_test_interface, only: hvcoord
     use eos,                   only: pnh_and_exner_from_eos2
@@ -32,15 +32,15 @@ contains
     real (kind=real_kind), intent(in) :: vtheta_dp(np,np,nlev)   
     real (kind=real_kind), intent(in) :: dp3d(np,np,nlev)   
     real (kind=real_kind), intent(in) :: dphi(np,np,nlev)
+    real (kind=real_kind), intent(in) :: phi_i(np,np,nlevp)
     real (kind=real_kind), intent(out) :: pnh(np,np,nlev)        ! nh nonhyrdo pressure
     real (kind=real_kind), intent(out) :: dpnh_dp_i(np,np,nlevp) ! d(pnh) / d(pi)
     real (kind=real_kind), intent(out) :: exner(np,np,nlev)      ! exner nh pressure
     !local
     real (kind=real_kind) :: phis(np,np)             ! phi surf
 
-    phis(:,:) = 0.0
-    call pnh_and_exner_from_eos2(hvcoord, vtheta_dp, dp3d, dphi, pnh, exner, dpnh_dp_i, &
-         phis, 'dirk_interface')
+    call pnh_and_exner_from_eos2(hvcoord, vtheta_dp, dp3d, dphi, pnh, exner, dpnh_dp_i, phi_i(:,:,nlevp),&
+         'dirk_interface',phi_i_in=phi_i)
   end subroutine pnh_and_exner_from_eos_f90
 
   subroutine phi_from_eos_f90(phis,vtheta_dp,dp,phi_i) bind(c)
@@ -67,22 +67,22 @@ contains
     call compute_gwphis(gwh_i,dp3d,v,gradphis,hvcoord)
   end subroutine compute_gwphis_f90
 
-  subroutine get_dirk_jacobian_f90(JacL,JacD,JacU,dt2,dp3d,dphi,pnh) bind(c)
+  subroutine get_dirk_jacobian_f90(JacL,JacD,JacU,dt2,dp3d,dphi,phi_i,pnh) bind(c)
     use dimensions_mod,        only: nlev, nlevp, np
-    use imex_mod,              only: get_dirk_jacobian
+    use imex_mod,              only: get_dirk_jacobian_deep, get_dirk_jacobian
 
     real (kind=real_kind), intent(in)    :: dp3d(np,np,nlev)
     real (kind=real_kind), intent(in)    :: dphi(np,np,nlev)
+    real (kind=real_kind), intent(in)    :: phi_i(np,np,nlevp)
     real (kind=real_kind), value, intent(in) :: dt2
     real (kind=real_kind), intent(inout) :: pnh(np,np,nlev)
     real (kind=real_kind), intent(out)   :: JacD(nlev,np,np)
     real (kind=real_kind), intent(out)   :: JacL(nlev-1,np,np),JacU(nlev-1,np,np)
-    !local
-    real (kind=real_kind)    :: phis(np,np)
-
-    phis(:,:) = 0.0
-    !note phis goes before pnh
-    call get_dirk_jacobian(JacL,JacD,JacU,dt2,dp3d,dphi,phis,pnh,1)
+#ifdef HOMMEDA
+    call get_dirk_jacobian_deep(JacL,JacD,JacU,dt2,dp3d,dphi,phi_i(:,:,nlevp),pnh,1)
+# else
+    call get_dirk_jacobian(JacL,JacD,JacU,dt2,dp3d,dphi,phi_i(:,:,nlevp),pnh,1)
+# endif
   end subroutine get_dirk_jacobian_f90
 
   subroutine c2f_f90(n, cnlev, cnlevp, dp3d, w_i, v, vtheta_dp, phinh_i, gradphis, phis) bind(c)

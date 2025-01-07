@@ -279,7 +279,7 @@ struct DirkFunctorImpl {
         });
         kv.team_barrier();
         const bool ok = pnh_and_exner_from_eos(kv, hvcoord, vtheta_dp, dp3d,
-                                               dphi, pnh, wrk, dpnh_dp_i);
+                                               dphi, phi_np1, pnh, wrk, dpnh_dp_i);
         if ( ! ok) nerr = 1;
         kv.team_barrier();
         loop_ki(kv, nlev, nvec, [&] (const int k, const int i) {
@@ -338,19 +338,27 @@ struct DirkFunctorImpl {
       loop_ki(kv, nlev, nvec, [&] (int k, int i) { w_np1(k,i) = (phi_np1(k,i) - phi_n0(k,i))/(dt2*grav); });
 
       loop_ki(kv, nlev, nvec, [&] (int k, int i) { dphi_n0(k,i) = phi_n0(k+1,i) - phi_n0(k,i); });
-
+# ifdef HOMMEDA
+        scan_dphi(kv, nlev, nvec, wrk, dphi, phi_np1); 
+        kv.team_barrier();
+# endif
+ 
       int it = 0;
       Real deltaerr;
       for (; it < maxiter; ++it) { // Newton iteration
         const bool ok = pnh_and_exner_from_eos(kv, hvcoord, vtheta_dp, dp3d,
-                                               dphi, pnh, wrk, dpnh_dp_i);
+                                               dphi, phi_np1, pnh, wrk, dpnh_dp_i);
         if ( ! ok) nerr = 1;
         kv.team_barrier();
+
         loop_ki(kv, nlev, nvec, [&] (const int k, const int i) {
           x(k,i) = -(w_np1(k,i) - (w_n0(k,i) + grav*dt2*(dpnh_dp_i(k,i) - 1))); // -residual
         });
-
+#ifdef HOMMEDA
+        calc_jacobian_deep(kv, dt2, dp3d, phi_np1, dphi, pnh, dl, d, du);
+#else
         calc_jacobian(kv, dt2, dp3d, dphi, pnh, dl, d, du);
+#endif
         kv.team_barrier();
         if (bfb_solver) solvebfb(kv, dl, d, du, x); else solve(kv, dl, d, du, x);
         kv.team_barrier();
@@ -376,6 +384,11 @@ struct DirkFunctorImpl {
         kv.team_barrier();
 
         loop_ki(kv, nlev, nvec, [&] (int k, int i) { w_np1(k,i) += wrk(2,i)*x(k,i); });
+# ifdef HOMMEDA
+        scan_dphi(kv, nlev, nvec, wrk, dphi, phi_np1); 
+        kv.team_barrier();
+# endif
+ 
 
         if (exit_on_step(kv, nlev, nvec, wmax, deltatol, x, deltaerr)) break;
       } // Newton iteration
@@ -553,12 +566,13 @@ struct DirkFunctorImpl {
     parallel_for(TeamThreadRange(kv.team, nlev-1), f2);
   }
 
-  template <typename R, typename W, typename Wi>
+  template <typename R, typename Ri, typename W, typename Wi>
   KOKKOS_INLINE_FUNCTION
   static bool pnh_and_exner_from_eos (
     const KernelVariables& kv, const HybridVCoord& hvcoord,
     // All arrays are in DIRK format.
     const R& vtheta_dp, const R& dp3d, const R& dphi,
+    const Ri& phi_i,
     // exner is workspace. dpnh_dp_i(nlevp,:) is not computed.
     const W& pnh, const W& exner, const Wi& dpnh_dp_i,
     const int nlev = NUM_PHYSICAL_LEV)
@@ -574,8 +588,17 @@ struct DirkFunctorImpl {
       const auto g = [&] (const int i) {
         for (int s = 0; s < ns; ++s)
           if (vtheta_dp(k,i)[s] < 0 || dphi(k,i)[s] > 0) ok = false;
+# ifdef HOMMEDA
+    const auto rhat_next = ((phi_i(k,i) + dphi(k,i))/PhysicalConstants::g +  PhysicalConstants::rearth0)/PhysicalConstants::rearth0;
+    const auto rhat_prev = (phi_i(k, i)/PhysicalConstants::g +  PhysicalConstants::rearth0)/PhysicalConstants::rearth0;
+    const auto rhatinvsqm = (rhat_prev * rhat_prev + rhat_next * rhat_next + rhat_prev * rhat_next) / 3.0;
         EquationOfState::compute_pnh_and_exner(
-          vtheta_dp(k,i), dphi(k,i), pnh(k,i), exner(k,i));
+          vtheta_dp(k,i), dphi(k,i), rhatinvsqm, pnh(k,i), exner(k,i));
+# else 
+        EquationOfState::compute_pnh_and_exner(
+          vtheta_dp(k,i), dphi(k,i), (Scalar) 1.0, pnh(k,i), exner(k,i));
+# endif
+
       };
       parallel_for(pv, g);
     };
@@ -586,8 +609,14 @@ struct DirkFunctorImpl {
     kv.team_barrier(); // wait for pnh
     const auto f2 = [&] (const int) {
       const auto k0 = [&] (const int i) {
-        const auto pnh_i_0 = hvcoord.hybrid_ai0*hvcoord.ps0; // hydrostatic ptop
-        dpnh_dp_i(0,i) = 2*(pnh(0,i) - pnh_i_0)/dp3d(0,i);
+# ifdef HOMMEDA
+      const auto rhat_top = (phi_i(0, i)/PhysicalConstants::g +  PhysicalConstants::rearth0)/PhysicalConstants::rearth0;
+# else
+      const auto rhat_top = 1.0;
+# endif
+      const auto invrhat_top = 1.0/rhat_top;
+        const auto pnh_i_0 = hvcoord.hybrid_ai0*hvcoord.ps0*(invrhat_top * invrhat_top); // hydrostatic ptop
+        dpnh_dp_i(0,i) = 2*(pnh(0,i) - pnh_i_0)/dp3d(0,i)*rhat_top * rhat_top;
       };
       parallel_for(pv, k0);
     };
@@ -597,8 +626,14 @@ struct DirkFunctorImpl {
       // gnu and std=c++14. The macro ConstExceptGnu is defined in share/cxx/Config.hpp.
       ConstExceptGnu auto k = km1 + 1;
       const auto kr = [&] (const int i) {
+# ifdef HOMMEDA
+        const auto rhat_top = (phi_i(k, i)/PhysicalConstants::g +  PhysicalConstants::rearth0)/PhysicalConstants::rearth0;
+# else
+      const auto rhat_top = 1.0; 
+# endif
+
         dpnh_dp_i(k,i) = ((pnh(k,i) - pnh(k-1,i))/
-                          ((dp3d(k-1,i) + dp3d(k,i))/2));
+                          ((dp3d(k-1,i) + dp3d(k,i))/2))*rhat_top * rhat_top ;
       };
       parallel_for(pv, kr);
     };
@@ -640,6 +675,9 @@ struct DirkFunctorImpl {
         wrk(k,i) = wrk(k+1,i) + wrk(k,i); // phi_i below + dphi
     });
   }
+
+
+
 
   template <typename Rphis, typename W>
   KOKKOS_INLINE_FUNCTION static void
@@ -704,6 +742,7 @@ struct DirkFunctorImpl {
     return deltaerr/wmax < deltatol;
   }
 
+
   /* Compute Jacobian of F(phi) = sum(dphi) + const + (dt*g)^2 *(1-dp/dpi)
      column wise with respect to phi. Form the tridiagonal analytical Jacobian J
      to solve J * x = -f.
@@ -729,7 +768,7 @@ struct DirkFunctorImpl {
       const auto ks = [&] (const int i) { // first Jacobian row
         const int k = 0;
         const auto b = a/dp3d(k,i);
-        du(k,i) = 2*b*(pnh(k,i)/dphi(k,i));
+        du(k,i) =2*b*(pnh(k,i)/dphi(k,i));
         d (k,i) = 1 - du(k,i);
       };
       parallel_for(pv, ks);
@@ -765,6 +804,117 @@ struct DirkFunctorImpl {
     };
     parallel_for(pt1, f3);
   }
+  template <typename R, typename W>
+  KOKKOS_INLINE_FUNCTION
+  static void calc_jacobian_deep (const KernelVariables& kv, const Real& dt2,
+                             // All arrays are in DIRK format.
+                             const R& dp3d, const R& phi_i, const R& dphi, const R& pnh,
+                             const W& dl, const W& d, const W& du,
+                             const int nlev = NUM_PHYSICAL_LEV) {
+    using Kokkos::parallel_for;
+    using PhysicalConstants::rearth0;
+    using PhysicalConstants::g;
+
+    const int n = npack;
+    const auto pv = Kokkos::ThreadVectorRange(kv.team, n);
+    const auto pt1 = Kokkos::TeamThreadRange(kv.team, 1);
+
+    const Real a = square(dt2*PhysicalConstants::g)/(1 - PhysicalConstants::kappa);
+
+    const auto f1 = [&] (const int) {
+      const auto ks = [&] (const int i) { // first Jacobian row
+        const int k = 0;
+        const auto b = a/dp3d(k,i);
+
+        const auto r_height_i = (rearth0 + phi_i(k,i)/g);
+        const auto r_hat_i = r_height_i/rearth0;
+        const auto r_height_ip1 = (rearth0 + phi_i(k+1,i)/g);
+        const auto r_hat_ip1 = r_height_ip1/rearth0;
+       const auto rhatsq_m1 = (r_height_i * r_height_i + r_height_ip1 * r_height_ip1 + r_height_i * r_height_ip1)/(3 * (rearth0* rearth0));
+       const auto q = (dt2* dt2) * 2/(dp3d(k,i)) * (pnh(k,i)) * 2*((rearth0 * g + phi_i(k,i))/(rearth0*rearth0));
+        const auto f = -dphi(k,i) *  (3*rearth0*g + 2 * phi_i(k,i) + phi_i(k+1,i))/(3*((rearth0*g)*(rearth0*g)));
+        const auto fprime = dphi(k,i) *  (3*rearth0*g +  phi_i(k,i) + 2*phi_i(k+1,i))/(3*((rearth0*g)*(rearth0*g)));
+ 
+        
+ 
+ 
+
+        du(k,i) = 2*b*(pnh(k,i)/dphi(k,i)) * r_hat_i*r_hat_i;
+        d (k,i) = 1- q - du(k,i) * (f + rhatsq_m1)/rhatsq_m1;
+        du(k,i) = du(k,i) * (fprime + rhatsq_m1)/rhatsq_m1;
+      };
+      parallel_for(pv, ks);
+    };
+    parallel_for(pt1, f1);
+    const auto f2 = [&] (const int km1) {
+      // The following is morally a const var, but there are issues with
+      // gnu and std=c++14. The macro ConstExceptGnu is defined in share/cxx/Config.hpp.
+      //ConstExceptGnu  auto k = km1 + 1;
+      ConstExceptGnu  auto kp1 = km1 + 2;
+      const auto kmid = [&] (const int i) { // middle Jacobian rows
+        const auto r_height_km1 = (rearth0 + phi_i(kp1-2,i)/g);
+        const auto r_height_k =  (rearth0 + phi_i(kp1-1,i)/g);
+        const auto r_hat_k = r_height_k/rearth0;
+        const auto r_height_kp1 =  (rearth0 + phi_i(kp1,i)/g);
+        const auto rhatsq_m1 = (r_height_km1*r_height_km1 + r_height_k*r_height_k + r_height_km1 * r_height_k) /(3 * (rearth0*rearth0));
+        const auto rhatsq_p1 = (r_height_k*r_height_k + r_height_kp1*r_height_kp1 + r_height_k * r_height_kp1) /(3 * (rearth0*rearth0));
+
+        const auto q = (dt2*dt2)*  2/(dp3d(kp1-2, i) + dp3d(kp1-1,i)) * (pnh(kp1-1,i)-pnh(kp1-2,i)) * 2*((rearth0 * g + phi_i(kp1-1,i))/(rearth0*rearth0));
+        // We could reuse these values from the previous layer, see fortran routine for how.
+        const auto dprime = -dphi(kp1-2,i) *  (3*rearth0*g + 2 * phi_i(kp1-2,i) + phi_i(kp1-1,i))/(3*((rearth0*g)*(rearth0*g)));
+
+        const auto dd = dphi(kp1-2,i) *  (3*PhysicalConstants::rearth0*g +  phi_i(kp1-2,i) + 2*phi_i(kp1-1,i))/(3*((rearth0*g)*(rearth0*g)));
+        
+
+        const auto fprime = dphi(kp1-1,i) *  (3*rearth0*g + phi_i(kp1-1,i) + 2*phi_i(kp1,i))/(3*((rearth0*g)*(rearth0*g)));
+        const auto f = -dphi(kp1-1,i) *  (3*rearth0*g + 2 * phi_i(kp1-1,i) + phi_i(kp1,i))/(3*((rearth0*g)*(rearth0*g)));
+
+        const auto b = 2*a/(dp3d(kp1-2,i) + dp3d(kp1-1,i));
+        dl(kp1-1,i) = b*(pnh(kp1-2,i)/dphi(kp1-2,i))*(r_hat_k*r_hat_k);
+        du(kp1-1,i) = b*(pnh(kp1-1  ,i)/dphi(kp1-1  ,i))*(r_hat_k*r_hat_k);
+        // In all rows k,
+        //     dl <= 0, du <= 0,
+        // and thus
+        //     d = 1 + |dl| + |du| > |dl| + |du|,
+        // making this Jacobian matrix strictly diagonally dominant. Thus, we
+        // need not pivot when factorizing the matrix.
+        d (kp1-1,i) = 1 -q - dl(kp1-1,i) * (dd+rhatsq_m1)/rhatsq_m1 - du(kp1-1,i) * (f + rhatsq_p1)/rhatsq_p1;
+        dl(kp1-1,i) = dl(kp1-1,i) * (dprime + rhatsq_m1)/rhatsq_m1;
+        du(kp1-1,i) = du(kp1-1,i) * (fprime + rhatsq_p1)/rhatsq_p1;
+      };
+      parallel_for(pv, kmid);
+    };
+    parallel_for(Kokkos::TeamThreadRange(kv.team, nlev-2), f2);
+    const auto f3 = [&] (const int) {
+      const auto ke = [&] (const int i) { // last Jacobian row
+        const int k = nlev-1;
+        const auto r_height_km1 = (rearth0 + phi_i(k-1,i)/g);
+        const auto r_height_k =  (rearth0 + phi_i(k,i)/g);
+        const auto r_hat_k = r_height_k/rearth0;
+        const auto r_height_kp1 =  (rearth0 + phi_i(k+1,i)/g);
+        const auto rhatsq_m1 = (r_height_km1*r_height_km1 + r_height_k*r_height_k + r_height_km1 * r_height_k) /(3 * (rearth0*rearth0));
+        const auto rhatsq_p1 = (r_height_k*r_height_k + r_height_kp1*r_height_kp1 + r_height_k * r_height_kp1) /(3 * (rearth0*rearth0));
+
+        const auto q = (dt2*dt2)*  2/(dp3d(k-1, i) + dp3d(k,i)) * (pnh(k,i)-pnh(k-1,i)) * 2*((rearth0 * g + phi_i(k,i))/(rearth0*rearth0));
+        // We could reuse these values from the previous layer, see fortran routine for how.
+        const auto dprime = -dphi(k-1,i) *  (3*rearth0*g + 2 * phi_i(k-1,i) + phi_i(k,i))/(3*((rearth0*g)*(rearth0*g)));
+
+        const auto dd = dphi(k-1,i) *  (3*PhysicalConstants::rearth0*g +  phi_i(k-1,i) + 2*phi_i(k,i))/(3*((rearth0*g)*(rearth0*g)));
+        
+
+        const auto fprime = dphi(k,i) *  (3*rearth0*g + phi_i(k,i) + 2*phi_i(k+1,i))/(3*((rearth0*g)*(rearth0*g)));
+        const auto f = -dphi(k,i) *  (3*rearth0*g + 2 * phi_i(k,i) + phi_i(k+1,i))/(3*((rearth0*g)*(rearth0*g)));
+
+        const auto b = 2*a/(dp3d(k-1,i) + dp3d(k,i));
+        dl(k,i) = b*(pnh(k-1,i)/dphi(k-1,i)) * (r_hat_k * r_hat_k);
+        d (k,i) = 1 - q - dl(k,i) * (dd + rhatsq_m1)/rhatsq_m1 - (r_hat_k * r_hat_k)*b*(pnh(k,i)/dphi(k,i)) * (f +rhatsq_p1)/rhatsq_p1; 
+        dl(k,i) = dl(k,i) * (dprime + rhatsq_m1)/rhatsq_m1;
+      };
+      parallel_for(pv, ke);
+    };
+    parallel_for(pt1, f3);
+  }
+
 
   template <typename W>
   KOKKOS_INLINE_FUNCTION

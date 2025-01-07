@@ -66,7 +66,6 @@ public:
       pressure_to_exner(exner(ilev));
     });
   }
-
   template<typename VThetaProvider, typename PhiProvider>
   KOKKOS_INLINE_FUNCTION
   bool compute_pnh_and_exner (const KernelVariables& kv,
@@ -78,8 +77,12 @@ public:
     // If you're hydrostatic, check outside the function
     assert (!m_theta_hydrostatic_mode);
 
+    
+
     // To avoid temporaries, use exner to store some temporaries
     ColumnOps::compute_midpoint_delta(kv,phi_i,exner);
+
+
 
     int nerr;
     Kokkos::parallel_reduce(Kokkos::ThreadVectorRange(kv.team,NUM_LEV),
@@ -91,7 +94,17 @@ public:
           ++nerr;
       }
       if (nerr) return;
-      compute_pnh_and_exner(vtheta_dp(ilev), exner(ilev), pnh(ilev), exner(ilev));
+# ifdef HOMMEDA
+    // adding dphi induces negligible truncation error, can be handled by adding bfb branch in fortran code.
+    const Scalar rhat_next = ((phi_i(ilev)+exner(ilev) )/PhysicalConstants::g  +  PhysicalConstants::rearth0)/PhysicalConstants::rearth0;
+    const Scalar rhat_prev = (( phi_i(ilev) )/PhysicalConstants::g  +  PhysicalConstants::rearth0)/PhysicalConstants::rearth0;
+    const Scalar rhatsqm = (rhat_prev * rhat_prev + rhat_next * rhat_next + rhat_prev * rhat_next) / 3.0;
+
+    compute_pnh_and_exner(vtheta_dp(ilev), exner(ilev), rhatsqm, pnh(ilev), exner(ilev));
+# else
+    compute_pnh_and_exner(vtheta_dp(ilev), exner(ilev), (Scalar) 1.0, pnh(ilev), exner(ilev));
+# endif
+
     }, nerr);
     return nerr == 0;
   }
@@ -102,9 +115,16 @@ public:
   //  3) exner = pnh/p_over_exner
   template<typename Scalar>
   KOKKOS_INLINE_FUNCTION
-  static void compute_pnh_and_exner (const Scalar& vtheta_dp, const Scalar& dphi,
+  static void compute_pnh_and_exner (const Scalar& vtheta_dp, const Scalar& dphi, 
+                                     const Scalar& rhatsqm,
                                      Scalar& pnh, Scalar& exner) {
+    
     exner = (-PhysicalConstants::Rgas)*vtheta_dp / dphi;
+
+# ifdef HOMMEDA
+      exner /= rhatsqm;
+# endif
+
     pnh = exner/PhysicalConstants::p0;
 #ifndef HOMMEXX_BFB_TESTING
     pnh = pow(pnh,1.0/(1.0-PhysicalConstants::kappa));
@@ -119,6 +139,7 @@ public:
   void compute_dpnh_dp_i (const KernelVariables& kv,
                           const ExecViewUnmanaged<const Scalar[NUM_LEV  ]>& pnh,
                           const ExecViewUnmanaged<const Scalar[NUM_LEV_P]>& dp_i,
+                          const ExecViewUnmanaged<const Scalar[NUM_LEV_P]>& phi_i,
                           const ExecViewUnmanaged<      Scalar[NUM_LEV_P]>& dpnh_dp_i) const
   {
     if (m_theta_hydrostatic_mode) {
@@ -138,12 +159,27 @@ public:
       Kokkos::parallel_for(Kokkos::ThreadVectorRange(kv.team,NUM_LEV),
                            [&](const int ilev) {
         dpnh_dp_i(ilev) /= dp_i(ilev);
+        auto rheighti = (phi_i(ilev)/PhysicalConstants::g + PhysicalConstants::rearth0);
+        auto rhati = rheighti/PhysicalConstants::rearth0;
+# ifdef HOMMEDA
+        dpnh_dp_i(ilev) =  dpnh_dp_i(ilev) * rhati * rhati;
+# endif
       });
 
       // Boundaries: delta(x) = 2*(x_m(last)-x_i(last)).
       // Top: pnh_i = pi_i = hyai(0)*ps0.
       // Bottom: approximate with hydrostatic, so that dpnh_dp_i=1
-      dpnh_dp_i(0)[0] = 2*(pnh(0)[0] - m_hvcoord.hybrid_ai(0)*m_hvcoord.ps0)/dp_i(0)[0];
+      auto inv_rhati = 1.0/((phi_i(0)[0]/PhysicalConstants::g + PhysicalConstants::rearth0)/PhysicalConstants::rearth0);
+      auto ptop = m_hvcoord.hybrid_ai(0)*m_hvcoord.ps0;
+#ifdef HOMMEDA
+      ptop = ptop * inv_rhati * inv_rhati;
+#endif
+      dpnh_dp_i(0)[0] = 2*(pnh(0)[0] - ptop)/dp_i(0)[0];
+      auto rheighti = (phi_i(0)[0]/PhysicalConstants::g + PhysicalConstants::rearth0);
+      auto rhati = rheighti/PhysicalConstants::rearth0;
+# ifdef HOMMEDA
+        dpnh_dp_i(0)[0] = dpnh_dp_i(0)[0] * rhati * rhati;
+# endif
       const Real pnh_last = pnh(LAST_MID_PACK)[LAST_MID_PACK_END];
       const Real dp_last = dp_i(LAST_INT_PACK)[LAST_INT_PACK_END];
       const Real pnh_i_last = pnh_last + dp_last/2;
