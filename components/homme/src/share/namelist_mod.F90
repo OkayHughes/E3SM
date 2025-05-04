@@ -1327,6 +1327,12 @@ end if
     ! options. But we should provide friendly message for others.
 #if defined MODEL_THETA_L
     write(iulog,*) 'Running dycore: theta-l'
+#ifdef HOMMEDA
+    write(iulog,*) 'theta-l dycore is running in deep-atmosphere mode'
+#else 
+    write(iulog,*) 'theta-l dycore is running in shallow-atmosphere mode'
+
+#endif
 #elif defined _PRIM
     write(iulog,*) 'Running dycore: preqx'
 #endif
