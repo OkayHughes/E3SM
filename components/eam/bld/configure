@@ -417,6 +417,7 @@ GetOptions(
     "psubcols=s"                => \$opts{'psubcols'},
     "rad=s"                     => \$opts{'rad'},
     "rce"                       => \$opts{'rce'},
+    "homme_is_deep"             => \$opts{'homme_is_deep'},
     "res=s"                     => \$opts{'res'},
     "rof=s"                     => \$opts{'rof'},
     "scam"                      => \$opts{'scam'},
@@ -1914,6 +1915,7 @@ if ($offline_dyn) { $cfg_cppdefs .= ' -DOFFLINE_DYN'; }
 if($dyn_pkg eq 'se'){
     if ($spmd eq 'ON'){	$cfg_cppdefs .=" -D_MPI"; }
     $cfg_cppdefs .= " -DCAM -D_PRIM ";
+    
 }
 
 # -DSPMD only added for CESM build.  The EAM Makefile has a separate SPMD macro.
@@ -2847,11 +2849,18 @@ sub write_cppdefs
     print $fh "$make_cppdefs";
 
     if ($dyn eq "se" and $opts{"dyn_target"} eq "theta-l") {
-        print $fh " -DMODEL_THETA_L -DHOMME_ENABLE_COMPOSE "
+        print $fh " -DMODEL_THETA_L -DHOMME_ENABLE_COMPOSE ";
+	if (defined $opts{'homme_is_deep'}) {
+	  print $fh " -DHOMMEDA";
+        } 
     }
 
     if ($dyn eq "se" and $opts{"dyn_target"} eq "theta-l_kokkos") {
-        print $fh " -DKOKKOS_TARGET -DMODEL_THETA_L -DHOMME_ENABLE_COMPOSE -DCOMPOSE_PORT"
+        print $fh " -DKOKKOS_TARGET -DMODEL_THETA_L -DHOMME_ENABLE_COMPOSE -DCOMPOSE_PORT";
+	if (defined $opts{'homme_is_deep'}) {
+	  print $fh " -DHOMMEDA";
+        } 
+ 
     }
 
     if ($dyn eq "se" and $opts{"dyn_target"} eq "preqx_kokkos") {
