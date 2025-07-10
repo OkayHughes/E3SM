@@ -62,6 +62,7 @@ module element_ops
   use physical_constants, only : p0, Cp, Rgas, Rwater_vapor, Cpwater_vapor, kappa, g, dd_pi, TREF, rearth
   use control_mod,    only: use_moisture, theta_hydrostatic_mode, hv_ref_profiles
   use eos,            only: pnh_and_exner_from_eos, phi_from_eos
+  use deep_atm_mod,   only: g_from_phi, g_from_z, z_from_phi
   implicit none
   private
 
@@ -542,7 +543,7 @@ recursive subroutine get_field(elem,name,field,hvcoord,nt,ntQ)
 
   ! set prognostic state variables at level midpoints
   elem%state%w_i  (i,j,k,  n0:n1)  = w
-  elem%state%phinh_i(i,j,k, n0:n1) = g*zm
+  elem%state%phinh_i(i,j,k, n0:n1) = g_from_z(zm)*zm
 
   end subroutine set_state_i
 
@@ -575,7 +576,7 @@ recursive subroutine get_field(elem,name,field,hvcoord,nt,ntQ)
     elem%state%vtheta_dp(:,:,:,n)   = (Rstar/Rgas)*T*dp*((p/p0)**(-kappa))
 
     elem%state%w_i (:,:,:,  n)   = w_i
-    elem%state%phinh_i(:,:,:, n) = g*zi
+    elem%state%phinh_i(:,:,:, n) = g_from_z(zi, nlevp) * zi
   end do
 
   end subroutine set_elem_state
@@ -633,10 +634,10 @@ recursive subroutine get_field(elem,name,field,hvcoord,nt,ntQ)
     endif
 
     do k=1,nlev
-       zm(:,:,k) = (phi_i(:,:,k)+phi_i(:,:,k+1))/(2*g)
+       zm(:,:,k) = z_from_phi((phi_i(:,:,k)+phi_i(:,:,k+1))/(2))
     end do
     do k=1,nlevp
-       zi(:,:,k) = phi_i(:,:,k)/g
+       zi(:,:,k) = z_from_phi(phi_i(:,:,k))
     end do
 
   end subroutine get_state
@@ -761,7 +762,7 @@ recursive subroutine get_field(elem,name,field,hvcoord,nt,ntQ)
   do ii=1,12
      phiSA = elem%state%phinh_i(:,:,:,tl)
 
-     rinter = phiSA(:,:,:)/g + r0
+     rinter = z_from_phi(phiSA(:,:,:),nlevp) + r0
      rhat = rinter/r0 ! r/r0
 
      ptop(:,:) = hvcoord%hyai(1)*hvcoord%ps0/rhat(:,:,1)/rhat(:,:,1)  ! hydrostatic ptop/rhat^2
@@ -786,8 +787,8 @@ recursive subroutine get_field(elem,name,field,hvcoord,nt,ntQ)
      end do
 
      do k=1,nlevp
-        muu(:,:,k) = -(v_i(:,:,1,k)*v_i(:,:,1,k)+v_i(:,:,2,k)*v_i(:,:,2,k))/rinter(:,:,k)/g &
-                     -elem%fcorcosine(:,:)*v_i(:,:,1,k)/g + 1.0
+        muu(:,:,k) = -(v_i(:,:,1,k)*v_i(:,:,1,k)+v_i(:,:,2,k)*v_Ai(:,:,2,k))/rinter(:,:,k)/g_from_z(rinter(:,:,k)-r0) &
+                     -elem%fcorcosine(:,:)*v_i(:,:,1,k)/g_from_z(rinter(:,:,k)-r0) + 1.0
      enddo
 #else
      muu(:,:,:) = 1.0
@@ -803,9 +804,9 @@ recursive subroutine get_field(elem,name,field,hvcoord,nt,ntQ)
      !reconstruct (r/r0)^3
      r3int(:,:,nlevp) = (rinter(:,:,nlevp) / r0)**3
      do k=nlev,1,-1
-        r3int(:,:,k) = r3int(:,:,k+1) + 3.0 * rgas * vtheta(:,:,k) * (pmid(:,:,k)/p0)**kappa / pmid(:,:,k) / g / r0
+        r3int(:,:,k) = r3int(:,:,k+1) + 3.0 * rgas * vtheta(:,:,k) * (pmid(:,:,k)/p0)**kappa / pmid(:,:,k) / g_from_phi(phiSA(:,:,k)) / r0 ! PHI USED FOR G IS HACK
      enddo
-     phiDA(:,:,1:nlev) = g*(r3int(:,:,1:nlev)**(1.0/3.0)-1)*r0
+     phiDA(:,:,1:nlev) = g_from_phi(phiSA(:,:,1:nlev),nlev)*(r3int(:,:,1:nlev)**(1.0/3.0)-1)*r0 ! PHI USED FOR G IS HACK
      phiDA(:,:,nlevp) = phiSA(:,:,nlevp)
 
      call pnh_and_exner_from_eos(hvcoord,vtheta,&

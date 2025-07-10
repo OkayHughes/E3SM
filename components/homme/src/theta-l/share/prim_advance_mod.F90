@@ -40,6 +40,7 @@ module prim_advance_mod
   use reduction_mod,      only: parallelmax, reductionbuffer_ordered_1d_t
   use time_mod,           only: timelevel_qdp, timelevel_t
   use prim_state_mod,     only: prim_diag_scalars, prim_energy_halftimes
+  use deep_atm_mod,       only: g_from_phi, z_from_phi
 #if !defined(CAM) && !defined(SCREAM)
   use test_mod,           only: set_prescribed_wind
 #endif
@@ -141,7 +142,7 @@ contains
 !   this should not be needed, but in case physics update u without updating w b.c.:
     do ie=nets,nete
        elem(ie)%state%w_i(:,:,nlevp,n0) = (elem(ie)%state%v(:,:,1,nlev,n0)*elem(ie)%derived%gradphis(:,:,1) + &
-            elem(ie)%state%v(:,:,2,nlev,n0)*elem(ie)%derived%gradphis(:,:,2))/g
+            elem(ie)%state%v(:,:,2,nlev,n0)*elem(ie)%derived%gradphis(:,:,2))/g_from_phi(elem(ie)%state%phis(:,:))
     enddo
  
 #if !defined(CAM) && !defined(SCREAM)
@@ -537,7 +538,7 @@ contains
 
      ! finally update w at the surface: 
      elem(ie)%state%w_i(:,:,nlevp,np1) = (elem(ie)%state%v(:,:,1,nlev,np1)*elem(ie)%derived%gradphis(:,:,1) + &
-          elem(ie)%state%v(:,:,2,nlev,np1)*elem(ie)%derived%gradphis(:,:,2))/g
+          elem(ie)%state%v(:,:,2,nlev,np1)*elem(ie)%derived%gradphis(:,:,2))/g_from_phi(elem(ie)%state%phis(:,:))
   enddo
   
   end subroutine applyCAMforcing_dynamics
@@ -770,7 +771,7 @@ contains
     
      ! finally update w at the surface: 
      elem(ie)%state%w_i(:,:,nlevp,nt) = (elem(ie)%state%v(:,:,1,nlev,nt)*elem(ie)%derived%gradphis(:,:,1) + &
-          elem(ie)%state%v(:,:,2,nlev,nt)*elem(ie)%derived%gradphis(:,:,2))/g
+          elem(ie)%state%v(:,:,2,nlev,nt)*elem(ie)%derived%gradphis(:,:,2))/g_from_phi(elem(ie)%state%phis(:,:))
   enddo
 
 
@@ -1006,7 +1007,7 @@ contains
 
      ! finally update w at the surface: 
      elem(ie)%state%w_i(:,:,nlevp,nt) = (elem(ie)%state%v(:,:,1,nlev,nt)*elem(ie)%derived%gradphis(:,:,1) + &
-          elem(ie)%state%v(:,:,2,nlev,nt)*elem(ie)%derived%gradphis(:,:,2))/g
+          elem(ie)%state%v(:,:,2,nlev,nt)*elem(ie)%derived%gradphis(:,:,2))/g_from_phi(elem(ie)%state%phis(:,:))
   enddo
 
 
@@ -1210,8 +1211,8 @@ contains
      vv => elem(ie)%state%v(:,:,:,:,n0)
      ww => elem(ie)%state%w_i(:,:,:,n0)
 !repeated code
-     rheighti = phi_i/g + r0
-     rheightm(:,:,1:nlev) = ((phi_i(:,:,1:nlev) + phi_i(:,:,2:nlevp))/2_real_kind)/g + r0
+     rheighti = z_from_phi(phi_i, nlevp) + r0
+     rheightm(:,:,1:nlev) = ((z_from_phi(phi_i(:,:,1:nlev), nlev) + z_from_phi(phi_i(:,:,2:nlevp), nlev))/2_real_kind) + r0
      rhati = rheighti/r0 ! r/r0
      rhatm = rheightm/r0
      invrhatm = 1_real_kind/rhatm
@@ -1222,7 +1223,7 @@ contains
      if (.not. theta_hydrostatic_mode) then
         ! check w b.c.
         temp(:,:,1) =  (elem(ie)%state%v(:,:,1,nlev,n0)*elem(ie)%derived%gradphis(:,:,1) + &
-             elem(ie)%state%v(:,:,2,nlev,n0)*elem(ie)%derived%gradphis(:,:,2))/g
+             elem(ie)%state%v(:,:,2,nlev,n0)*elem(ie)%derived%gradphis(:,:,2))/g_from_phi(elem(ie)%state%phis)
         do j=1,np
         do i=1,np
            if ( abs(temp(i,j,1)-elem(ie)%state%w_i(i,j,nlevp,n0)) >1e-10) then
@@ -1447,11 +1448,11 @@ contains
 #endif
 
         ! w - tendency on interfaces
-        w_tens(:,:,k) = (-w_vadv_i(:,:,k) - v_gradw_i(:,:,k))*scale1 - scale2*g*(1-dpnh_dp_i(:,:,k))
+        w_tens(:,:,k) = (-w_vadv_i(:,:,k) - v_gradw_i(:,:,k))*scale1 - scale2*g_from_phi(phi_i(:,:,k))*(1-dpnh_dp_i(:,:,k))
 
 #ifdef HOMMEDA
-        wt4(:,:,k) = dpnh_dp_i(:,:,k)*g
-        wt5(:,:,k) = -g
+        wt4(:,:,k) = dpnh_dp_i(:,:,k)*g_from_phi(phi_i(:,:,k))
+        wt5(:,:,k) = -g_from_phi(phi_i(:,:,k))
 
         !add DA metric term in w_t : \bu^2/r
         w_tens(:,:,k) = w_tens(:,:,k) +scale1*(v2_over_r_i(:,:,1,k) + v2_over_r_i(:,:,2,k))
@@ -1472,10 +1473,10 @@ contains
 #endif
 
         phi_tens(:,:,k) =  (-phi_vadv_i(:,:,k) - v_gradphinh_i(:,:,k))*scale1 &
-          + scale2*g*elem(ie)%state%w_i(:,:,k,n0)
+          + scale2*g_from_phi(phi_i(:,:,k))*elem(ie)%state%w_i(:,:,k,n0)
 
 #if defined HOMMEDA && defined ENERGY_DIAGNOSTICS 
-        pt2(:,:,k) = g*elem(ie)%state%w_i(:,:,k,n0)
+        pt2(:,:,k) = g_from_phi(phi_i(:,:,k))*elem(ie)%state%w_i(:,:,k,n0)
 
         phi_tens_notopo(:,:,k) = phi_tens(:,:,k)
 #endif
@@ -1511,10 +1512,10 @@ contains
 #endif
 
      ! w - tendency on interfaces
-     w_tens(:,:,k) = (-w_vadv_i(:,:,k) - v_gradw_i(:,:,k))*scale1 - scale1*g*(1-dpnh_dp_i(:,:,k) )
+     w_tens(:,:,k) = (-w_vadv_i(:,:,k) - v_gradw_i(:,:,k))*scale1 - scale1*g_from_phi(phi_i(:,:,k))*(1-dpnh_dp_i(:,:,k) )
 #ifdef HOMMEDA
-     wt4(:,:,k) = dpnh_dp_i(:,:,k)*g
-     wt5(:,:,k) = -g
+     wt4(:,:,k) = dpnh_dp_i(:,:,k)*g_from_phi(phi_i(:,:,k))
+     wt5(:,:,k) = -g_from_phi(phi_i(:,:,k))
 
      !add DA metric term in w_t : \bu^2/r
      w_tens(:,:,k) = w_tens(:,:,k) +scale1*(v2_over_r_i(:,:,1,k) + v2_over_r_i(:,:,2,k))
@@ -1536,10 +1537,10 @@ contains
 #endif
 
      phi_tens(:,:,k) =  (-phi_vadv_i(:,:,k) - v_gradphinh_i(:,:,k))*scale1 &
-     + scale1*g*elem(ie)%state%w_i(:,:,k,n0)
+     + scale1*g_from_phi(phi_i(:,:,k))*elem(ie)%state%w_i(:,:,k,n0)
     
 #if defined HOMMEDA && defined ENERGY_DIAGNOSTICS 
-     pt2(:,:,k) = g*elem(ie)%state%w_i(:,:,k,n0)
+     pt2(:,:,k) = g_from_phi(phi_i(:,:,k))*elem(ie)%state%w_i(:,:,k,n0)
      phi_tens_notopo(:,:,k) = phi_tens(:,:,k)
 #endif
 
@@ -2040,13 +2041,13 @@ contains
                     -Cp*exner(i,j,k)*div_v_theta(i,j,k)
 
                !  Form P1  = -P2  (no reason to compute P2?)
-               elem(ie)%accum%P1(i,j)=elem(ie)%accum%P1(i,j) -g*dp3d(i,j,k)* &
-                    ( elem(ie)%state%w_i(i,j,k,n0) + &
-                    elem(ie)%state%w_i(i,j,k+1,n0) )/2
+               elem(ie)%accum%P1(i,j)=elem(ie)%accum%P1(i,j) -dp3d(i,j,k)* &
+                    ( g_from_phi(elem(ie)%state%phinh_i(i,j,k,n0)) * elem(ie)%state%w_i(i,j,k,n0) + &
+                     g_from_phi(elem(ie)%state%phinh_i(i,j,k+1,n0)) * elem(ie)%state%w_i(i,j,k+1,n0) )/2
                !  Form P2
-               elem(ie)%accum%P2(i,j)=elem(ie)%accum%P2(i,j) + g*dp3d(i,j,k)*&
-                    ( elem(ie)%state%w_i(i,j,k,n0) + &
-                    elem(ie)%state%w_i(i,j,k+1,n0) )/2
+               elem(ie)%accum%P2(i,j)=elem(ie)%accum%P2(i,j) + dp3d(i,j,k)*&
+                    (g_from_phi(elem(ie)%state%phinh_i(i,j,k,n0)) * elem(ie)%state%w_i(i,j,k,n0) + &
+                    g_from_phi(elem(ie)%state%phinh_i(i,j,k+1,n0)) * elem(ie)%state%w_i(i,j,k+1,n0) )/2
 
             enddo
          enddo
@@ -2055,19 +2056,19 @@ contains
       ! these terms are better easier to compute by summing interfaces
       do k=2,nlev
          elem(ie)%accum%T2(:,:)=elem(ie)%accum%T2(:,:)+                &
-              (g*elem(ie)%state%w_i(:,:,k,n0)-v_gradphinh_i(:,:,k)) &
+              (g_from_phi(phi_i(:,:,k))*elem(ie)%state%w_i(:,:,k,n0)-v_gradphinh_i(:,:,k)) &
                * dpnh_dp_i(:,:,k)*dp3d_i(:,:,k)
       enddo
       ! boundary terms
       do k=1,nlevp,nlev
          elem(ie)%accum%T2(:,:)=elem(ie)%accum%T2(:,:)+                &
-           (g*elem(ie)%state%w_i(:,:,k,n0)-v_gradphinh_i(:,:,k)) &
+           (g_from_phi(phi_i(:,:,k))*elem(ie)%state%w_i(:,:,k,n0)-v_gradphinh_i(:,:,k)) &
            * dpnh_dp_i(:,:,k)*dp3d_i(:,:,k)/2
       enddo
       ! boundary term is incorrect.  save the term so we can correct it
       ! once we have coorect value of dpnh_dp_i:
       elem(ie)%accum%T2_nlevp_term(:,:)=&
-           (g*elem(ie)%state%w_i(:,:,nlevp,n0)-v_gradphinh_i(:,:,nlevp)) &
+           (g_from_phi(phi_i(:,:,nlevp))*elem(ie)%state%w_i(:,:,nlevp,n0)-v_gradphinh_i(:,:,nlevp)) &
            * dp3d_i(:,:,nlevp)/2
 
    endif
@@ -2188,14 +2189,14 @@ contains
         ! solve for (dpnh_dp_i-1)
         dpnh_dp_i(:,:,nlevp) = 1 + (  &
              ((elem(ie)%state%v(:,:,1,nlev,np1)*elem(ie)%derived%gradphis(:,:,1) + &
-             elem(ie)%state%v(:,:,2,nlev,np1)*elem(ie)%derived%gradphis(:,:,2))/g - &
+             elem(ie)%state%v(:,:,2,nlev,np1)*elem(ie)%derived%gradphis(:,:,2))/g_from_phi(elem(ie)%state%phis) - &
              elem(ie)%state%w_i(:,:,nlevp,np1)) / &
-             (g + ( elem(ie)%derived%gradphis(:,:,1)**2 + &
-             elem(ie)%derived%gradphis(:,:,2)**2)/(2*g))   )  / dt2
+             (g_from_phi(elem(ie)%state%phis)  + ( elem(ie)%derived%gradphis(:,:,1)**2 + &
+             elem(ie)%derived%gradphis(:,:,2)**2)/(2*g_from_phi(elem(ie)%state%phis) ))   )  / dt2
 
         ! update solution with new dpnh_dp_i value:
         elem(ie)%state%w_i(:,:,nlevp,np1) = elem(ie)%state%w_i(:,:,nlevp,np1) +&
-             scale1*dt2*g*(dpnh_dp_i(:,:,nlevp)-1)
+             scale1*dt2*g_from_phi(elem(ie)%state%phis) *(dpnh_dp_i(:,:,nlevp)-1)
         elem(ie)%state%v(:,:,1,nlev,np1) =  elem(ie)%state%v(:,:,1,nlev,np1) -&
              scale1*dt2*(dpnh_dp_i(:,:,nlevp)-1)*elem(ie)%derived%gradphis(:,:,1)/2
         elem(ie)%state%v(:,:,2,nlev,np1) =  elem(ie)%state%v(:,:,2,nlev,np1) -&
@@ -2219,7 +2220,7 @@ contains
 #ifdef MUCORR
         ! check w b.c.
         temp(:,:,1) =  (elem(ie)%state%v(:,:,1,nlev,np1)*elem(ie)%derived%gradphis(:,:,1) + &
-             elem(ie)%state%v(:,:,2,nlev,np1)*elem(ie)%derived%gradphis(:,:,2))/g
+             elem(ie)%state%v(:,:,2,nlev,np1)*elem(ie)%derived%gradphis(:,:,2))/g_from_phi(elem(ie)%state%phis)
         do j=1,np
         do i=1,np
            if ( abs(temp(i,j,1)-elem(ie)%state%w_i(i,j,nlevp,np1)) >1e-10) then

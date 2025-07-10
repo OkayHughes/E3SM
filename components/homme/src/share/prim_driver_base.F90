@@ -26,7 +26,8 @@ module prim_driver_base
   use reduction_mod,    only: reductionbuffer_ordered_1d_t, red_min, red_max, red_max_int, &
                               red_sum, red_sum_int, red_flops, initreductionbuffer, &
                               red_max_index, red_min_index
-  use physical_constants, only:rearth, gravit => g
+  use physical_constants, only:rearth
+  use deep_atm_mod,     only: g_from_phi, z_from_phi
 #if !defined(CAM) && !defined(SCREAM)
   use prim_restart_mod, only : initrestartfile
   use restart_io_mod ,  only : readrestart
@@ -1464,7 +1465,7 @@ contains
   subroutine set_tracer_transport_derived_values(elem, nets, nete, tl)
     use control_mod,        only: nu_p, transport_alg
     use time_mod,           only: TimeLevel_t
-    use physical_constants, only: rearth, gravit => g
+    use physical_constants, only: rearth
 
     type(element_t),      intent(inout) :: elem(:)
     integer,              intent(in)    :: nets, nete
@@ -1499,7 +1500,7 @@ contains
 #ifdef HOMMEDA
           phi_i = elem(ie)%state%phinh_i(:,:,:,tl%n0)
 !repeated code
-          rheighti = phi_i/gravit + r0
+          rheighti = z_from_phi(phi_i,nlevp) + r0
           rheightm(:,:,1:nlev) = (rheighti(:,:,1:nlev) + rheighti(:,:,2:nlevp))/2
           rhatm = rheightm/r0
           invrhatm = 1/rhatm
@@ -1604,7 +1605,7 @@ contains
   use hybvcoord_mod,      only : hvcoord_t
 #ifdef MODEL_THETA_L
   use control_mod,        only : theta_hydrostatic_mode
-  use physical_constants, only : cp, g, kappa, Rgas, p0
+  use physical_constants, only : cp, kappa, Rgas, p0
   use element_ops,        only : get_temperature, get_r_star, get_hydro_pressure
   use eos,                only : pnh_and_exner_from_eos
 #ifdef HOMMEDA
@@ -1834,12 +1835,12 @@ contains
       phi_n1(:,:,k)=phi_n1(:,:,k+1) + Rgas*vthn1(:,:,k)*exner(:,:,k)/pnh(:,:,k)
 #else
       !bottom rhat for this midlevel
-      rs = phi_n1(:,:,k+1)/gravit/r0 + 1.0
+      rs = z_from_phi(phi_n1(:,:,k+1))/r0 + 1.0
      
       !top rhat for this midlevel
-      r1=( rs**3.0 + 3.0*Rgas*vthn1(:,:,k)/p_exner(:,:,k)/gravit/r0 )**(1.0/3.0)
+      r1=( rs**3.0 + 3.0*Rgas*vthn1(:,:,k)/p_exner(:,:,k)/g_from_phi(phi_n1(:,:,k+1))/r0 )**(1.0/3.0) ! PHI USED FOR G IS HACK
 
-      phi_n1(:,:,k)=gravit*r0*(r1-1.0)
+      phi_n1(:,:,k)=g_from_phi(phi_n1(:,:,k+1))*r0*(r1-1.0) ! PHI USED FOR G IS HACK
 !ifdef HOMMEDA
 #endif  
    enddo

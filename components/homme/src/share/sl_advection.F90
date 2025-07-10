@@ -18,6 +18,7 @@ module sl_advection
   use perf_mod, only           : t_startf, t_stopf, t_barrierf ! _EXTERNAL
   use parallel_mod, only       : abortmp, parallel_t
   use coordinate_systems_mod, only : cartesian3D_t
+  use deep_atm_mod,           only : z_from_phi
 #ifdef HOMME_ENABLE_COMPOSE
   use compose_mod
 #endif
@@ -478,7 +479,7 @@ contains
   subroutine calc_trajectory(elem, deriv, hvcoord, hybrid, dt, tl, &
        independent_time_steps, nets, nete)
     use vertremap_base, only : remap1
-    use physical_constants, only : rearth, gravit => g
+    use physical_constants, only : rearth
 
     type (element_t)     , intent(inout) :: elem(:)
     type (derivative_t)  , intent(in   ) :: deriv
@@ -507,7 +508,7 @@ contains
 #ifdef HOMMEDA
        phi_i = elem(ie)%state%phinh_i(:,:,:,tl%np1)
 !repeated code
-       rheighti = phi_i/gravit + r0
+       rheighti = z_from_phi(phi_i,nlevp) + r0
        rheightm(:,:,1:nlev) = (rheighti(:,:,1:nlev) + rheighti(:,:,2:nlevp))/2
        rhatm = rheightm/r0
        invrhatm = 1/rhatm

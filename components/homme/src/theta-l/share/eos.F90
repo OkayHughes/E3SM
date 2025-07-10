@@ -22,8 +22,9 @@ module eos
   use hybvcoord_mod,  only: hvcoord_t
   use kinds,          only: real_kind
   use parallel_mod,   only: abortmp
-  use physical_constants, only : p0, kappa, g, Rgas, rearth
+  use physical_constants, only : p0, kappa, Rgas, rearth
   use control_mod,    only: theta_hydrostatic_mode
+  use deep_atm_mod,   only: z_from_phi
 #ifdef HOMMEXX_BFB_TESTING
   use bfb_mod,        only: bfb_pow
 #endif
@@ -142,7 +143,7 @@ implicit none
 
   r0=rearth
 
-  rheighti = phi_i/g + r0
+  rheighti = z_from_phi(phi_i,nlevp) + r0
   rheightm(:,:,1:nlev) = (rheighti(:,:,1:nlev) + rheighti(:,:,2:nlevp))/2.0_real_kind
   rhati = rheighti/r0 ! r/r0
   rhatm = rheightm/r0
@@ -153,7 +154,7 @@ implicit none
                     rhati(:,:,2:nlevp)*rhati(:,:,2:nlevp) + &
                     rhati(:,:,1:nlev)*rhati(:,:,2:nlevp))/3.0_real_kind
 #ifdef HOMMEXX_BFB_TESTING
-  rheight_above = (phi_i(:, :, 1:nlev) + dphi)/g + r0
+  rheight_above = z_from_phi((phi_i(:, :, 1:nlev) + dphi),nlev) + r0
   rhat_above = rheight_above/r0 ! r/r0
   newrhatsquared = (rhati(:,:,1:nlev)*rhati(:,:,1:nlev)   + &
                     rhat_above*rhat_above + &

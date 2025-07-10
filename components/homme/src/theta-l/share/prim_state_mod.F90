@@ -25,7 +25,8 @@ module prim_state_mod
   use viscosity_mod,    only: compute_zeta_C0
   use reduction_mod,    only: parallelmax,parallelmin,parallelmaxwithindex,parallelminwithindex
   use perf_mod,         only: t_startf, t_stopf
-  use physical_constants, only : p0,Cp,g,Rgas
+  use physical_constants, only : p0,Cp,Rgas
+  use deep_atm_mod,       only : g_from_phi, z_from_phi
 
 implicit none
 private
@@ -79,7 +80,7 @@ contains
 
   subroutine prim_printstate(elem, tl,hybrid,hvcoord,nets,nete)
 
-    use physical_constants,     only: dd_pi
+    use physical_constants,     only: dd_pi, g
 
     type(element_t),            intent(inout), target :: elem(:)
     type(TimeLevel_t),target,   intent(in) :: tl
@@ -276,7 +277,7 @@ contains
        do k=1,nlev
           dphi(:,:,k)=-(phi_i(:,:,k+1)-phi_i(:,:,k))
           w_over_dz(:,:,k)=&
-             g*max(elem(ie)%state%w_i(:,:,k,n0)/dphi(:,:,k),&
+             g_from_phi((phi_i(:,:,k) + phi_i(:,:,k+1)/2))*max(elem(ie)%state%w_i(:,:,k,n0)/dphi(:,:,k),&
              elem(ie)%state%w_i(:,:,k+1,n0)/dphi(:,:,k))
        enddo
 
@@ -1052,7 +1053,7 @@ subroutine prim_energy_halftimes(elem,hvcoord,tl,n,t_before_advance,nets,nete)
     use dimensions_mod, only : np, np, nlev,nlevp
     use hybvcoord_mod, only : hvcoord_t
     use element_mod, only : element_t
-    use physical_constants, only : Cp, cpwater_vapor, g, rearth
+    use physical_constants, only : Cp, cpwater_vapor, rearth
     use physics_mod, only : Virtual_Specific_Heat
     use prim_si_mod, only : preq_hydrostatic
 
@@ -1096,7 +1097,7 @@ subroutine prim_energy_halftimes(elem,hvcoord,tl,n,t_before_advance,nets,nete)
 
 !repeated code
 #ifdef HOMMEDA
-       rheighti3 = ( elem(ie)%state%phinh_i(:,:,:,1)/g + r0 )**3
+       rheighti3 = ( z_from_phi(elem(ie)%state%phinh_i(:,:,:,1), nlevp) + r0 )**3
 #endif
 
        dpt1=elem(ie)%state%dp3d(:,:,:,t1)
@@ -1144,7 +1145,7 @@ subroutine prim_energy_halftimes(elem,hvcoord,tl,n,t_before_advance,nets,nete)
           suml(:,:)=suml(:,:)+&
                 Cp*elem(ie)%state%vtheta_dp(:,:,k,t1)*exner(:,:,k)
 #ifdef HOMMEDA
-          suml2(:,:) = suml2(:,:)+ g / r0 / r0 / 3 * (rheighti3(:,:,k+1)-rheighti3(:,:,k))*pnh(:,:,k)
+          suml2(:,:) = suml2(:,:)+ g_from_phi((phi_i(:,:,k+1)+phi_i(:,:,k))/2) / r0 / r0 / 3 * (rheighti3(:,:,k+1)-rheighti3(:,:,k))*pnh(:,:,k)
 #else
           suml2(:,:) = suml2(:,:)+(phi_i(:,:,k+1)-phi_i(:,:,k))*pnh(:,:,k)
 #endif

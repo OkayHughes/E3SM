@@ -25,9 +25,10 @@ module model_init_mod
   use control_mod,        only: qsplit,theta_hydrostatic_mode, hv_ref_profiles, &
        hv_theta_correction, tom_sponge_start
   use time_mod,           only: timelevel_qdp, timelevel_t
-  use physical_constants, only: g, TREF, Rgas, kappa, rearth
+  use physical_constants, only: TREF, Rgas, kappa, rearth
   use imex_mod,           only: test_imex_jacobian
   use eos,                only: phi_from_eos
+  use deep_atm_mod,       only: g_from_phi, z_from_phi
 
   implicit none
 
@@ -60,7 +61,7 @@ contains
 
 !repeated code
 #ifdef HOMMEDA
-     rheighti =  elem(ie)%state%phinh_i(:,:,:,1)/g + r0
+     rheighti =  z_from_phi(elem(ie)%state%phinh_i(:,:,:,1),nlevp) + r0
      rhati = rheighti/r0 ! r/r0
      invrhati = 1.0/rhati
 #endif
@@ -82,7 +83,7 @@ contains
       else
         elem(ie)%state%w_i(:,:,nlevp,tl%n0) = (&
            elem(ie)%state%v(:,:,1,nlev,tl%n0)*elem(ie)%derived%gradphis(:,:,1) + &
-           elem(ie)%state%v(:,:,2,nlev,tl%n0)*elem(ie)%derived%gradphis(:,:,2))/g
+           elem(ie)%state%v(:,:,2,nlev,tl%n0)*elem(ie)%derived%gradphis(:,:,2))/g_from_phi(elem(ie)%state%phis)
       endif
 
       ! assign phinh_i(nlevp) to be phis at all timelevels

@@ -38,7 +38,8 @@ contains
   use hybvcoord_mod,  only: hvcoord_t
   use control_mod,    only: rsplit
   use hybrid_mod,     only: hybrid_t
-  use physical_constants, only : Cp,g
+  use physical_constants, only : Cp
+  use deep_atm_mod,   only: g_from_phi
 
   type (hybrid_t),  intent(in)    :: hybrid  ! distributed parallel structure (shared)
   type (element_t), intent(inout) :: elem(:)
@@ -146,7 +147,7 @@ contains
 
         ! since u changed, update w b.c.:
         elem(ie)%state%w_i(:,:,nlevp,np1) = (elem(ie)%state%v(:,:,1,nlev,np1)*elem(ie)%derived%gradphis(:,:,1) + &
-             elem(ie)%state%v(:,:,2,nlev,np1)*elem(ie)%derived%gradphis(:,:,2))/g
+             elem(ie)%state%v(:,:,2,nlev,np1)*elem(ie)%derived%gradphis(:,:,2))/g_from_phi(elem(ie)%state%phis)
        
      endif
 

@@ -10,11 +10,12 @@ module imex_mod
   use element_mod,        only: element_t
   use derivative_mod,     only: derivative_t
   use time_mod,           only: timelevel_t, timelevel_qdp
-  use physical_constants, only: g, kappa, rearth
+  use physical_constants, only: kappa, rearth, g
   use eos,                only: pnh_and_exner_from_eos, pnh_and_exner_from_eos2, phi_from_eos
   use element_state,      only: max_itercnt, max_deltaerr, max_reserr
   use control_mod,        only: theta_hydrostatic_mode, qsplit
   use perf_mod,           only: t_startf, t_stopf
+  use deep_atm_mod,       only: g_from_phi, z_from_phi
 #ifdef HOMMEXX_BFB_TESTING
           use iso_c_binding,      only: c_loc
 #endif
@@ -179,12 +180,12 @@ module imex_mod
                elem(ie)%state%dp3d(:,:,:,nt),elem(ie)%state%phinh_i(:,:,:,nt),pnh,   &
                exner,dpnh_dp_i,caller='dirkn0')
           w_n0(:,:,1:nlev)     = w_n0(:,:,1:nlev) + &
-               dt3*g*(dpnh_dp_i(:,:,1:nlev)-1) 
+               dt3*g_from_phi(phi_n0(:,:,1:nlev), nlev)*(dpnh_dp_i(:,:,1:nlev)-1) 
 
           call compute_gwphis(gwh_i,elem(ie)%state%dp3d(:,:,:,nt),elem(ie)%state%v(:,:,:,:,nt),&
                elem(ie)%derived%gradphis,hvcoord)
           phi_n0(:,:,1:nlev) = phi_n0(:,:,1:nlev) + &
-               dt3*g*elem(ie)%state%w_i(:,:,1:nlev,nt) -  dt3*gwh_i(:,:,1:nlev)
+               dt3*g_from_phi(phi_n0(:,:,1:nlev), nlev)*elem(ie)%state%w_i(:,:,1:nlev,nt) -  dt3*gwh_i(:,:,1:nlev)
        end if
 
 
@@ -195,12 +196,12 @@ module imex_mod
                elem(ie)%state%dp3d(:,:,:,nt),elem(ie)%state%phinh_i(:,:,:,nt),pnh,   &
                exner,dpnh_dp_i,caller='dirknm1')
           w_n0(:,:,1:nlev)     = w_n0(:,:,1:nlev) + &
-               dt3*g*(dpnh_dp_i(:,:,1:nlev)-1)
+               dt3*g_from_phi(phi_n0(:,:,1:nlev),nlev)*(dpnh_dp_i(:,:,1:nlev)-1)
 
           call compute_gwphis(gwh_i,elem(ie)%state%dp3d(:,:,:,nt),elem(ie)%state%v(:,:,:,:,nt),&
                elem(ie)%derived%gradphis,hvcoord)
           phi_n0(:,:,1:nlev) = phi_n0(:,:,1:nlev) + &
-               dt3*g*elem(ie)%state%w_i(:,:,1:nlev,nt) -  dt3*gwh_i(:,:,1:nlev)
+               dt3*g_from_phi(phi_n0(:,:,1:nlev), nlev)*elem(ie)%state%w_i(:,:,1:nlev,nt) -  dt3*gwh_i(:,:,1:nlev)
        end if
 
        ! add just the wphis(np1) term to the RHS
@@ -211,23 +212,23 @@ module imex_mod
 
 #if 0
        ! w(np1) as initial guess:
-       phi_np1(:,:,1:nlev) =  phi_n0(:,:,1:nlev) +  dt2*g*w_np1(:,:,1:nlev)
+       phi_np1(:,:,1:nlev) =  phi_n0(:,:,1:nlev) +  dt2*g_from_phi(phi_n0(:,:,1:nlev),nlev)*w_np1(:,:,1:nlev)
 #endif
 #if 0
        ! phi_np1 as initial guess:
-       w_np1(:,:,1:nlev) = (phi_np1(:,:,1:nlev) -  phi_n0(:,:,1:nlev) )/(dt2*g)
+       w_np1(:,:,1:nlev) = (z_from_phi(phi_np1(:,:,1:nlev),nlev) - z_from_phi(phi_n0(:,:,1:nlev)) )/(dt2)
 #endif
 #if 0
        ! wh_i as initial guess:
-       w_np1(:,:,1:nlev)=gwh_i(:,:,1:nlev)/g  
-       phi_np1(:,:,1:nlev) =  phi_n0(:,:,1:nlev) +  dt2*g*w_np1(:,:,1:nlev)
+       w_np1(:,:,1:nlev)=gwh_i(:,:,1:nlev)/g_from_phi(phi_n0(:,:,1:nlev),nlev)
+       phi_np1(:,:,1:nlev) =  phi_n0(:,:,1:nlev) +  dt2*g_from_phi(phi_n0(:,:,1:nlev),nlev)*w_np1(:,:,1:nlev)
 #endif
 #if 1
        ! Quite bad on small planets with DA!
        ! use hydrostatic for initial guess
        call phi_from_eos(hvcoord,elem(ie)%state%phis,elem(ie)%state%vtheta_dp(:,:,:,np1),&
             elem(ie)%state%dp3d(:,:,:,np1),phi_np1)
-       w_np1(:,:,1:nlev) = (phi_np1(:,:,1:nlev) -  phi_n0(:,:,1:nlev) )/(dt2*g)
+       w_np1(:,:,1:nlev) = (z_from_phi(phi_np1(:,:,1:nlev), nlev) - z_from_phi(phi_n0(:,:,1:nlev), nlev) )/(dt2)
 #endif
 
        ! initial residual
@@ -256,13 +257,13 @@ module imex_mod
           do k=nlev,1,-1  ! scan
              phi_np1(:,:,k) = phi_np1(:,:,k+1)-dphi(:,:,k)
           enddo
-          w_np1(:,:,1:nlev) = (phi_np1(:,:,1:nlev) -  phi_n0(:,:,1:nlev) )/(dt2*g)
+          w_np1(:,:,1:nlev) = (z_from_phi(phi_np1(:,:,1:nlev), nlev) -  z_from_phi(phi_n0(:,:,1:nlev), nlev) )/(dt2)
        endif
 
        call pnh_and_exner_from_eos2(hvcoord,elem(ie)%state%vtheta_dp(:,:,:,np1),elem(ie)%state%dp3d(:,:,:,np1),&
             dphi,pnh,exner,dpnh_dp_i,elem(ie)%state%phis,'dirk1',phi_i_in=phi_np1)
        Fn(:,:,1:nlev) = w_np1(:,:,1:nlev) - &
-            (w_n0(:,:,1:nlev) + g*dt2 * (dpnh_dp_i(:,:,1:nlev)-1))
+            (w_n0(:,:,1:nlev) + g_from_phi(phi_np1(:,:,1:nlev), nlev)*dt2 * (dpnh_dp_i(:,:,1:nlev)-1))
 
 
        itercount=0
@@ -290,10 +291,10 @@ module imex_mod
 
           do k = 1,nlev-1
              dphi(:,:,k) = dphi_n0(:,:,k) + &
-                  dt2*g*((w_np1(:,:,k+1) - w_np1(:,:,k)) + &
-                          (x(:,:,k+1) - x(:,:,k)))
+                  dt2*((g_from_phi(phi_n0(:,:,k+1))*w_np1(:,:,k+1) - g_from_phi(phi_n0(:,:,k))*w_np1(:,:,k)) + &
+                          (g_from_phi(phi_n0(:,:,k+1)) * x(:,:,k+1) - g_from_phi(phi_n0(:,:,k)) * x(:,:,k)))
           end do
-          dphi(:,:,nlev) = dphi_n0(:,:,nlev) - dt2*g*(w_np1(:,:,nlev) + x(:,:,nlev))
+          dphi(:,:,nlev) = dphi_n0(:,:,nlev) - dt2*g_from_phi(phi_n0(:,:,nlev))*(w_np1(:,:,nlev) + x(:,:,nlev))
 
           alphas = 1
           if (any(dphi(:,:,1:nlev) >= 0)) then
@@ -312,7 +313,7 @@ module imex_mod
                          dw = -w_np1(i,j,k)
                       end if
                       if (dx /= 0) then
-                         alpha_k = -(dphi_n0(i,j,k) + dt2*g*dw)/(dt2*g*dx)
+                         alpha_k = -(dphi_n0(i,j,k) + dt2*g_from_phi((phi_n0(i,j,k) +phi_n0(i,j,k+1))/2._real_kind)*dw)/(dt2*g_from_phi((phi_n0(i,j,k) + phi_n0(i,j,k+1))/2._real_kind)*dx)
                          if (alpha_k >= 0) alpha = min(alpha, alpha_k)
                       end if
                    end do
@@ -323,10 +324,10 @@ module imex_mod
 
                    do k = 1,nlev-1
                       dphi(i,j,k) = dphi_n0(i,j,k) + &
-                           dt2*g*((w_np1(i,j,k+1) - w_np1(i,j,k)) + &
-                           alpha*(x(i,j,k+1) - x(i,j,k)))
+                           dt2*((g_from_phi(phi_n0(i,j,k+1)) * w_np1(i,j,k+1) - g_from_phi(phi_n0(i,j,k)) * w_np1(i,j,k)) + &
+                           alpha*(g_from_phi(phi_n0(i,j,k+1)) * x(i,j,k+1) - g_from_phi(phi_n0(i,j,k)) * x(i,j,k)))
                    end do
-                   dphi(i,j,nlev) = dphi_n0(i,j,nlev) - dt2*g*(w_np1(i,j,nlev) + alpha*x(i,j,nlev))
+                   dphi(i,j,nlev) = dphi_n0(i,j,nlev) - dt2*g_from_phi(phi_n0(i,j,nlev) )*(w_np1(i,j,nlev) + alpha*x(i,j,nlev))
                 end do
              end do
           end if
@@ -336,7 +337,7 @@ module imex_mod
 
           call pnh_and_exner_from_eos2(hvcoord,elem(ie)%state%vtheta_dp(:,:,:,np1),&
                elem(ie)%state%dp3d(:,:,:,np1),dphi,pnh,exner,dpnh_dp_i,elem(ie)%state%phis,'dirk2')
-          Fn(:,:,1:nlev) = w_np1(:,:,1:nlev) - (w_n0(:,:,1:nlev) + g*dt2 * (dpnh_dp_i(:,:,1:nlev)-1))
+          Fn(:,:,1:nlev) = w_np1(:,:,1:nlev) - (w_n0(:,:,1:nlev) + g_from_phi(phi_n0(:,:,1:nlev),nlev)*dt2 * (dpnh_dp_i(:,:,1:nlev)-1))
 
           ! this is not used in this loop, so move out of loop
           !reserr=maxval(abs(Fn))/(wmax*abs(dt2)) 
@@ -350,7 +351,7 @@ module imex_mod
        !call t_stopf('dirk_iteration')
 
        ! update phi:
-       phi_np1(:,:,1:nlev) =  phi_n0(:,:,1:nlev) +  dt2*g*w_np1(:,:,1:nlev)
+       phi_np1(:,:,1:nlev) =  phi_n0(:,:,1:nlev) +  dt2*g_from_phi(phi_n0(:,:,1:nlev), nlev)*w_np1(:,:,1:nlev)
 
 
        ! keep track of running  max iteraitons and max error (reset after each diagnostics output)
@@ -419,7 +420,7 @@ module imex_mod
     real (kind=real_kind) :: e(np,np,nlev),dphi_temp(np,np,nlev),exner(np,np,nlev)
     real (kind=real_kind) :: dpnh2(np,np,nlev),dpnh_dp_i_epsie(np,np,nlevp)
     real (kind=real_kind) :: ds(np,np,nlev),delta_mu(np,np,nlevp)
-    real (kind=real_kind) :: a,b(np,np),ck(np,np),ckm1(np,np)
+    real (kind=real_kind) :: a(np,np),b(np,np),ck(np,np),ckm1(np,np)
     !
     integer :: k,l,k2
     if (exact.eq.1) then ! use exact Jacobian
@@ -537,13 +538,13 @@ module imex_mod
          phi_i(:,:,k) = phi_i(:,:,k+1)-dphi(:,:,k)
        end do
        k  = 1 ! Jacobian row 1
-       r_hat = (rearth + phi_i(:,:, k)/g)/rearth ! DA_CHANGE
-       rhatsq_m1 = ((phi_i(:,:,k)/g + rearth)**2 + (phi_i(:,:,k+1)/g + rearth)**2 + (phi_i(:,:,k)/g + rearth)*(phi_i(:,:,k+1)/g+rearth)) /(3_real_kind * rearth**2)
-       q = (dt2)**2 * 2_real_kind/(dp3d(:,:,k)) * (pnh(:,:,k)) * 2_real_kind*((rearth * g + phi_i(:,:,k))/(rearth)**2)
-       a  = (dt2*g)**2/(1-kappa) ! DA_CHANGE
+       r_hat = (rearth + z_from_phi(phi_i(:,:, k)))/rearth ! DA_CHANGE
+       rhatsq_m1 = ((z_from_phi(phi_i(:,:,k)) + rearth)**2 + (z_from_phi(phi_i(:,:,k+1)) + rearth)**2 + (z_from_phi(phi_i(:,:,k)) + rearth)*(z_from_phi(phi_i(:,:,k+1))+rearth)) /(3_real_kind * rearth**2)
+       q = (dt2)**2 * 2_real_kind/(dp3d(:,:,k)) * (pnh(:,:,k)) * 2_real_kind*((rearth * g_from_phi(phi_i(:,:,k)) + phi_i(:,:,k))/(rearth)**2)
+       a  = (dt2*g_from_phi(phi_i(:,:,k)))**2/(1-kappa) ! DA_CHANGE
        b  =  a/dp3d(:,:,k)
-       fprime = dphi(:,:,k) *  (3_real_kind*rearth*g +  phi_i(:,:,k) + 2_real_kind*phi_i(:,:,k+1))/(3_real_kind*(rearth*g)**2)
-       f = -dphi(:,:,k) *  (3_real_kind*rearth*g + 2_real_kind * phi_i(:,:,k) + phi_i(:,:,k+1))/(3_real_kind*(rearth*g)**2)
+       fprime = dphi(:,:,k) *  (3_real_kind*rearth*g_from_phi(phi_i(:,:,k)) +  phi_i(:,:,k) + 2_real_kind*phi_i(:,:,k+1))/(3_real_kind*(rearth*g_from_phi(phi_i(:,:,k)))**2) ! PHI USED FOR G IS HACK
+       f = -dphi(:,:,k) *  (3_real_kind*rearth*g_from_phi(phi_i(:,:,k+1)) + 2_real_kind * phi_i(:,:,k) + phi_i(:,:,k+1))/(3_real_kind*(rearth*g_from_phi(phi_i(:,:,k+1)))**2) ! PHI USED FOR G IS HACK
        ck = pnh(:,:,k)/dphi(:,:,k)
 
        JacU(:,:,k) =  2*b*ck*r_hat*r_hat  
@@ -553,13 +554,14 @@ module imex_mod
        JacU(:,:,k  ) = JacU(:,:,k  ) *  (fprime + rhatsq_m1)/rhatsq_m1
        ckm1 = ck
        do k = 2,nlev-1 ! Jacobian row k
-          r_hat =  (rearth + phi_i(:,:, k)/g)/rearth ! DA_CHANGE
-          rhatsq_p1 = ((phi_i(:,:,k)/g + rearth)**2 + (phi_i(:,:,k+1)/g + rearth)**2 + (phi_i(:,:,k)/g + rearth) *(phi_i(:,:,k+1)/g+rearth)) /(3_real_kind * rearth**2)
-          q = (dt2)**2*  2_real_kind/(dp3d(:,:,k-1) + dp3d(:,:,k)) * (pnh(:,:,k)-pnh(:,:,k-1)) * 2_real_kind*((rearth * g + phi_i(:,:,k))/(rearth)**2)
+          r_hat =  (rearth + z_from_phi(phi_i(:,:, k)))/rearth ! DA_CHANGE
+          a  = (dt2*g_from_phi(phi_i(:,:,k)))**2/(1-kappa) ! DA_CHANGE
+          rhatsq_p1 = ((z_from_phi(phi_i(:,:,k)) + rearth)**2 + (z_from_phi(phi_i(:,:,k+1)) + rearth)**2 + (z_from_phi(phi_i(:,:,k)) + rearth) *(z_from_phi(phi_i(:,:,k+1))+rearth)) /(3_real_kind * rearth**2)
+          q = (dt2)**2*  2_real_kind/(dp3d(:,:,k-1) + dp3d(:,:,k)) * (pnh(:,:,k)-pnh(:,:,k-1)) * 2_real_kind*((rearth * g_from_phi(phi_i(:,:,k)) + phi_i(:,:,k))/(rearth)**2)
           dprime = f
           d = fprime
-          fprime = dphi(:,:,k) *  (3_real_kind*rearth*g + phi_i(:,:,k) + 2_real_kind*phi_i(:,:,k+1))/(3_real_kind*(rearth*g)**2)
-          f = -dphi(:,:,k) *  (3_real_kind*rearth*g + 2_real_kind * phi_i(:,:,k) + phi_i(:,:,k+1))/(3_real_kind*(rearth*g)**2)
+          fprime = dphi(:,:,k) *  (3_real_kind*rearth*g_from_phi(phi_i(:,:,k)) + phi_i(:,:,k) + 2_real_kind*phi_i(:,:,k+1))/(3_real_kind*(rearth*g_from_phi(phi_i(:,:,k)))**2) ! PHI USED FOR G IS HACK
+          f = -dphi(:,:,k) *  (3_real_kind*rearth*g_from_phi(phi_i(:,:,k+1)) + 2_real_kind * phi_i(:,:,k) + phi_i(:,:,k+1))/(3_real_kind*(rearth*g_from_phi(phi_i(:,:,k+1)))**2) ! PHI USED FOR G IS HACK
  
           b  = 2*a/(dp3d(:,:,k-1) + dp3d(:,:,k))
           ck = pnh(:,:,k)/dphi(:,:,k)
@@ -579,14 +581,15 @@ module imex_mod
        end do
 
        k  = nlev ! Jacobian row nlev
-       r_hat(:,:) = (rearth + phi_i(:,:, k)/g)/rearth !DA_CHANGE
-       rhatsq_p1 = ((phi_i(:,:,k)/g + rearth)**2 + (phi_i(:,:,k+1)/g + rearth)**2 + (phi_i(:,:,k)/g + rearth) * (phi_i(:,:,k+1)/g+rearth)) /(3 * rearth**2)
-       q = (dt2)**2 * 2/(dp3d(:,:,k-1) + dp3d(:,:,k)) * (pnh(:,:,k)-pnh(:,:,k-1)) * 2*((rearth * g + phi_i(:,:,k))/(rearth)**2)
+       r_hat(:,:) = (rearth + z_from_phi(phi_i(:,:, k)))/rearth !DA_CHANGE
+       rhatsq_p1 = ((z_from_phi(phi_i(:,:,k)) + rearth)**2 + (z_from_phi(phi_i(:,:,k+1)) + rearth)**2 + (z_from_phi(phi_i(:,:,k)) + rearth) * (z_from_phi(phi_i(:,:,k+1))+rearth)) /(3 * rearth**2)
+       q = (dt2)**2 * 2/(dp3d(:,:,k-1) + dp3d(:,:,k)) * (pnh(:,:,k)-pnh(:,:,k-1)) * 2*((rearth * g_from_phi(phi_i(:,:,k)) + phi_i(:,:,k))/(rearth)**2)
        dprime = f
        d = fprime
  
-       f = -dphi(:,:,k) *  (3*rearth*g + 2 * phi_i(:,:,k) + phi_i(:,:,k+1))/(3*(rearth*g)**2)
-       a  = (dt2*g)**2/(1-kappa) !DA_CHANGE
+       f = -dphi(:,:,k) *  (3*rearth*g_from_phi(phi_i(:,:,k+1)) + 2 * phi_i(:,:,k) + phi_i(:,:,k+1))/(3*(rearth*g_from_phi(phi_i(:,:,k+1)))**2) ! PHI USED FOR G IS HACK
+
+       a  = (dt2*g_from_phi(phi_i(:,:,k)))**2/(1-kappa) ! DA_CHANGE
        b  = 2*a/(dp3d(:,:,k) + dp3d(:,:,k-1))
        ck = pnh(:,:,k)/dphi(:,:,k)
 
@@ -626,7 +629,7 @@ module imex_mod
               phi_i(:,:,k2) = phi_i(:,:,k2+1)-dphi_temp(:,:,k2)
            enddo
            call pnh_and_exner_from_eos2(hvcoord,vtheta_dp,dp3d,dphi_temp,pnh,exner,dpnh_dp_i_epsie,phis,'get_dirk_jacobian') 
-           delta_mu(:,:,:)= (g*dt2)**2*(dpnh_dp_i(:,:,:)-dpnh_dp_i_epsie(:,:,:))/epsie ! DA_CHANGE
+           delta_mu(:,:,:)= (g_from_phi(phi_i, nlevp)*dt2)**2*(dpnh_dp_i(:,:,:)-dpnh_dp_i_epsie(:,:,:))/epsie ! DA_CHANGE
         end if
 
         JacD(:,:,k) = 1 +  delta_mu(:,:,k)

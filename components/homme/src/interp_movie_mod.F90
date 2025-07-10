@@ -30,7 +30,7 @@ module interp_movie_mod
        nf_init_decomp, &
        get_varindex
 
-  use physical_constants, only : omega, g, rrearth, dd_pi, kappa, p0
+  use physical_constants, only : omega,  rrearth, dd_pi, kappa, p0
 
   use control_mod, only : test_case, runtype, &
        restartfreq, &

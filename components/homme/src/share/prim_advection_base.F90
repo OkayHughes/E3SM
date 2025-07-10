@@ -47,7 +47,7 @@ module prim_advection_base
 !
   use kinds, only              : real_kind
   use dimensions_mod, only     : nlev, nlevp, np, qsize
-  use physical_constants, only : rgas, Rwater_vapor, kappa, g, rearth, rrearth, cp
+  use physical_constants, only : rgas, Rwater_vapor, kappa, rearth, rrearth, cp
   use derivative_mod, only     : derivative_t, gradient_sphere, divergence_sphere
   use element_mod, only        : element_t
   use hybvcoord_mod, only      : hvcoord_t
