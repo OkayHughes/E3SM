@@ -1,4 +1,4 @@
-thetal_setup()
+thetal_setup(0)
 
 ADD_DEFINITIONS(-DHOMME_WITHOUT_PIOLIBRARY)
 
