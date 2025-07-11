@@ -7,7 +7,7 @@
 #include "share/field/field.hpp"
 #include "share/field/field_manager.hpp"
 #include "share/field/field_utils.hpp"
-#include "share/util/scream_setup_random_test.hpp"
+#include "share/util/eamxx_setup_random_test.hpp"
 
 #include "share/grid/point_grid.hpp"
 
@@ -704,6 +704,102 @@ TEST_CASE ("print_field_hyperslab") {
       expected << "    " << v(iel,icmp,igp,jgp,ilev) << ", \n";
 
     REQUIRE (out.str()==expected.str());
+  }
+}
+
+TEST_CASE ("compute_mask") {
+  using namespace scream;
+
+  using namespace ShortFieldTagsNames;
+
+  // Setup random number generation
+  ekat::Comm comm(MPI_COMM_WORLD);
+
+  const int ncols = 3*comm.size();
+  const int nlevs = 128;
+  const auto units = ekat::units::Units::nondimensional();
+
+  // Create field (if available, use packs, to ensure we don't print garbage)
+  std::vector<FieldTag> tags3d = {COL, CMP, LEV};
+  std::vector<FieldTag> tags2d = {COL, LEV};
+  std::vector<int>      dims3d = {ncols,2,nlevs};
+  std::vector<int>      dims2d = {ncols,nlevs};
+
+  FieldIdentifier fid3d ("foo", {tags3d,dims3d}, units, "some_grid");
+  FieldIdentifier fid3di ("foo", {tags3d,dims3d}, units, "some_grid", DataType::IntType);
+  FieldIdentifier fid2d ("foo", {tags2d,dims2d}, units, "some_grid");
+
+  SECTION ("exceptions") {
+    // Test compute_mask exception handling
+    Field f (fid3d);
+    Field m1 (fid3d);
+
+    REQUIRE_THROWS(compute_mask<Comparison::EQ>(f,1,m1)); // Field not allocated
+    f.allocate_view();
+    REQUIRE_THROWS(compute_mask<Comparison::EQ>(f,1,m1)); // Mask not allocated
+    m1.allocate_view();
+
+    Field m2 (fid2d);
+    m2.allocate_view();
+    REQUIRE_THROWS(compute_mask<Comparison::EQ>(f,1,m2)); // incompatible layouts
+  }
+
+  SECTION ("check") {
+    Field x(fid3d), one(fid3di), zero(fid3di), m(fid3di);
+
+    x.allocate_view();
+    one.allocate_view();
+    m.allocate_view();
+    zero.allocate_view();
+
+    one.deep_copy(1);
+    zero.deep_copy(0);
+    x.deep_copy(2);
+
+    // x==1 is false
+    m.deep_copy(-1);
+    compute_mask<Comparison::EQ>(x,1,m);
+    REQUIRE(views_are_equal(m,zero));
+
+    // x!=1 is true
+    m.deep_copy(-1);
+    compute_mask<Comparison::NE>(x,1,m);
+    REQUIRE(views_are_equal(m,one));
+
+    // x==2 is true
+    m.deep_copy(-1);
+    compute_mask<Comparison::EQ>(x,2,m);
+    REQUIRE(views_are_equal(m,one));
+
+    // x>1 is true
+    m.deep_copy(-1);
+    compute_mask<Comparison::GT>(x,1,m);
+    REQUIRE(views_are_equal(m,one));
+
+    // x>2 is false
+    m.deep_copy(-1);
+    compute_mask<Comparison::GT>(x,2,m);
+    REQUIRE(views_are_equal(m,zero));
+
+    // x>=2 is true
+    m.deep_copy(-1);
+    compute_mask<Comparison::GE>(x,2,m);
+    REQUIRE(views_are_equal(m,one));
+
+    // x<3 is true
+    m.deep_copy(-1);
+    compute_mask<Comparison::LT>(x,3,m);
+    REQUIRE(views_are_equal(m,one));
+
+    // x<2 is flase
+    m.deep_copy(-1);
+    compute_mask<Comparison::LT>(x,2,m);
+    REQUIRE(views_are_equal(m,zero));
+
+    // x<=2 is true
+    m.deep_copy(-1);
+    compute_mask<Comparison::LE>(x,2,m);
+    REQUIRE(views_are_equal(m,one));
   }
 }
 

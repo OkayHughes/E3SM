@@ -6,7 +6,7 @@
 
 #include "share/atm_process/atmosphere_process.hpp"
 #include "share/atm_process/ATMBufferManager.hpp"
-#include "share/util/scream_column_ops.hpp"
+#include "share/util/eamxx_column_ops.hpp"
 
 #include "physics/share/physics_constants.hpp"
 
@@ -61,7 +61,7 @@ public:
   AtmosphereProcessType type () const { return AtmosphereProcessType::Physics; }
 
   // The name of the subcomponent
-  std::string name () const { return "iop"; }
+  std::string name () const { return "iop_forcing"; }
 
   // Set the grid
   void set_grids (const std::shared_ptr<const GridsManager> grids_manager);

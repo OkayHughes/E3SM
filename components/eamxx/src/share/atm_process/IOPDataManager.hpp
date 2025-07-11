@@ -1,11 +1,11 @@
 #ifndef SCREAM_IOP_HPP
 #define SCREAM_IOP_HPP
 
-#include "share/scream_types.hpp"
+#include "share/eamxx_types.hpp"
 #include "share/field/field_manager.hpp"
 #include "share/grid/abstract_grid.hpp"
 #include "share/grid/remap/abstract_remapper.hpp"
-#include "share/util/scream_time_stamp.hpp"
+#include "share/util/eamxx_time_stamp.hpp"
 
 #include "ekat/ekat_parameter_list.hpp"
 #include "ekat/ekat_pack.hpp"
@@ -74,7 +74,7 @@ public:
                                      const std::shared_ptr<const AbstractGrid>& tgt_grid);
 
   // Set fields using data loaded from the iop file
-  void set_fields_from_iop_data(const field_mgr_ptr field_mgr);
+  void set_fields_from_iop_data(const field_mgr_ptr field_mgr, const std::string& grid_name);
 
   // The IOP file may contain temperature values that are
   // 0 at or above the surface. Correct these values using
@@ -85,7 +85,7 @@ public:
   // Note: We only need to use the first column because during
   //       the loading of ICs, every columns will have the same
   //       data.
-  void correct_temperature_and_water_vapor(const field_mgr_ptr field_mgr);
+  void correct_temperature_and_water_vapor(const field_mgr_ptr field_mgr, const std::string& grid_name);
 
   ekat::ParameterList& get_params() { return m_params; }
 

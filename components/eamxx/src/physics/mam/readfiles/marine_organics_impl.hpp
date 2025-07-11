@@ -3,8 +3,8 @@
 
 #include "share/grid/remap/identity_remapper.hpp"
 #include "share/grid/remap/refining_remapper_p2p.hpp"
-#include "share/io/scream_scorpio_interface.hpp"
-#include "share/util/scream_timing.hpp"
+#include "share/io/eamxx_scorpio_interface.hpp"
+#include "share/util/eamxx_timing.hpp"
 
 namespace scream {
 namespace marine_organics {
@@ -48,8 +48,6 @@ marineOrganicsFunctions<S, D>::create_horiz_remapper(
     remapper =
         std::make_shared<RefiningRemapperP2P>(horiz_interp_tgt_grid, map_file);
   }
-
-  remapper->registration_begins();
 
   const auto tgt_grid = remapper->get_tgt_grid();
 
@@ -153,8 +151,8 @@ void marineOrganicsFunctions<S, D>::update_marine_organics_timestate(
   const auto month = ts.get_month() - 1;  // Make it 0-based
   if(month != time_state.current_month) {
     // Update the marineOrganics time state information
-    time_state.current_month = month;
-    time_state.t_beg_month = ts.curr_month_beg().frac_of_year_in_days();
+    time_state.current_month   = month;
+    time_state.t_beg_month     = ts.curr_month_beg().frac_of_year_in_days();
     time_state.days_this_month = ts.days_in_curr_month();
 
     // Copy end'data into beg'data, and read in the new

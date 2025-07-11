@@ -2,8 +2,8 @@
 
 #include "share/grid/remap/coarsening_remapper.hpp"
 #include "share/grid/point_grid.hpp"
-#include "share/io/scream_scorpio_interface.hpp"
-#include "share/util/scream_setup_random_test.hpp"
+#include "share/io/eamxx_scorpio_interface.hpp"
+#include "share/util/eamxx_setup_random_test.hpp"
 #include "share/field/field_utils.hpp"
 
 namespace scream {
@@ -337,7 +337,6 @@ TEST_CASE("coarsening_remap")
   //     Register fields in the remapper    //
   // -------------------------------------- //
 
-  remap->registration_begins();
   for (size_t i=0; i<tgt_f.size(); ++i) {
     remap->register_field(src_f[i],tgt_f[i]);
   }

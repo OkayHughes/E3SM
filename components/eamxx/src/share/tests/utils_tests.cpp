@@ -1,11 +1,11 @@
 #include <catch2/catch.hpp>
 
-#include "share/util/scream_array_utils.hpp"
-#include "share/util/scream_universal_constants.hpp"
-#include "share/util/scream_utils.hpp"
-#include "share/util/scream_time_stamp.hpp"
-#include "share/util/scream_setup_random_test.hpp"
-#include "share/scream_config.hpp"
+#include "share/util/eamxx_array_utils.hpp"
+#include "share/util/eamxx_universal_constants.hpp"
+#include "share/util/eamxx_utils.hpp"
+#include "share/util/eamxx_time_stamp.hpp"
+#include "share/util/eamxx_setup_random_test.hpp"
+#include "share/eamxx_config.hpp"
 
 TEST_CASE("contiguous_superset") {
   using namespace scream;
@@ -142,6 +142,12 @@ TEST_CASE ("time_stamp") {
     REQUIRE (ts2.get_year()==(ts1.get_year()+1));
 
     REQUIRE (ts2.get_num_steps()==6);
+  }
+
+  SECTION ("fractional_update") {
+    // Check update with fractional seconds
+    REQUIRE ((ts1+0.999)==ts1);
+    REQUIRE ((ts1+0.9999)!=ts1); // When seconds frac is <0.001 or >0.999 we round
   }
 
   SECTION ("leap_years") {

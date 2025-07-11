@@ -1,6 +1,6 @@
 #include "catch2/catch.hpp"
 
-#include "share/scream_types.hpp"
+#include "share/eamxx_types.hpp"
 #include "ekat/ekat_pack.hpp"
 #include "ekat/kokkos/ekat_kokkos_utils.hpp"
 #include "p3_functions.hpp"
@@ -175,6 +175,12 @@ void run_bfb_p3_main_part2()
     P3MainPart2Data(1,  72,   72,    1,   -1, true,          false,       1.800E+03),
   };
 
+  std::vector<Real> hetfrz_immersion_nucleation_tend(72,0.0);
+  std::vector<Real> hetfrz_contact_nucleation_tend(72,0.0);
+  std::vector<Real> hetfrz_deposition_nucleation_tend(72,0.0);
+  std::vector<Real> qr2qv_evap(72,0.0), qi2qv_sublim(72,0.0), qc2qr_accret(72,0.0), qc2qr_autoconv(72,0.0), qv2qi_vapdep(72,0.0),
+    qc2qi_berg(72,0.0), qc2qr_ice_shed(72,0.0), qc2qi_collect(72,0.0), qr2qi_collect(72,0.0), qc2qi_hetero_freeze(72,0.0),
+    qr2qi_immers_freeze(72,0.0), qi2qr_melt(72,0.0);
   static constexpr Int num_runs = sizeof(isds_baseline) / sizeof(P3MainPart2Data);
 
   for (auto& d : isds_baseline) {
@@ -214,13 +220,17 @@ void run_bfb_p3_main_part2()
   for (auto& d : isds_cxx) {
     p3_main_part2_host(
       d.kts, d.kte, d.kbot, d.ktop, d.kdir, d.do_predict_nc, d.do_prescribed_CCN, d.dt, d.inv_dt,
+      hetfrz_immersion_nucleation_tend.data(), hetfrz_contact_nucleation_tend.data(), hetfrz_deposition_nucleation_tend.data(),
       d.pres, d.dpres, d.dz, d.nc_nuceat_tend, d.inv_exner, d.exner, d.inv_cld_frac_l, d.inv_cld_frac_i,
       d.inv_cld_frac_r, d.ni_activated, d.inv_qc_relvar, d.cld_frac_i, d.cld_frac_l, d.cld_frac_r, d.qv_prev, d.t_prev,
       d.T_atm, d.rho, d.inv_rho, d.qv_sat_l, d.qv_sat_i, d.qv_supersat_i, d.rhofacr, d.rhofaci, d.acn, d.qv, d.th_atm, d.qc, d.nc, d.qr, d.nr, d.qi, d.ni,
       d.qm, d.bm, d.qc_incld, d.qr_incld, d.qi_incld, d.qm_incld, d.nc_incld, d.nr_incld,
       d.ni_incld, d.bm_incld, d.mu_c, d.nu, d.lamc, d.cdist, d.cdist1, d.cdistr, d.mu_r, d.lamr, d.logn0r, d.qv2qi_depos_tend, d.precip_total_tend,
-      d.nevapr, d.qr_evap_tend, d.vap_liq_exchange, d.vap_ice_exchange, d.liq_ice_exchange, d.pratot,
-      d.prctot, &d.is_hydromet_present);
+      d.nevapr, d.qr_evap_tend, d.vap_liq_exchange, d.vap_ice_exchange, d.liq_ice_exchange,
+      qr2qv_evap.data(), qi2qv_sublim.data(), qc2qr_accret.data(), qc2qr_autoconv.data(),
+      qv2qi_vapdep.data(), qc2qi_berg.data(), qc2qr_ice_shed.data(), qc2qi_collect.data(), qr2qi_collect.data(),
+      qc2qi_hetero_freeze.data(), qr2qi_immers_freeze.data(), qi2qr_melt.data(),
+      d.pratot, d.prctot, &d.is_hydromet_present);
   }
 
   if (SCREAM_BFB_TESTING && this->m_baseline_action == COMPARE) {
@@ -425,7 +435,7 @@ void run_bfb_p3_main()
         {d.qv             , {0              , 5.00000000E-02}},
         {d.qv_prev        , {0              , 5.00000000E-02}},
         {d.th_atm         , {6.72653866E+02 , 1.07954335E+03}}, //PMC - this range seems insane
-        {d.t_prev         , {1.50000000E+02 , 3.50000000E+02}},
+        {d.t_prev         , {1.50000000E+02 , 3.50000000E+02}}
     });
   }
 
@@ -449,7 +459,7 @@ void run_bfb_p3_main()
       d.qc, d.nc, d.qr, d.nr, d.th_atm, d.qv, d.dt, d.qi, d.qm, d.ni,
       d.bm, d.pres, d.dz, d.nc_nuceat_tend, d.nccn_prescribed, d.ni_activated, d.inv_qc_relvar, d.it, d.precip_liq_surf,
       d.precip_ice_surf, d.its, d.ite, d.kts, d.kte, d.diag_eff_radius_qc, d.diag_eff_radius_qi, d.diag_eff_radius_qr,
-      d.rho_qi, d.do_predict_nc, d.do_prescribed_CCN, d.dpres, d.inv_exner, d.qv2qi_depos_tend,
+      d.rho_qi, d.do_predict_nc, d.do_prescribed_CCN, d.use_hetfrz_classnuc, d.dpres, d.inv_exner, d.qv2qi_depos_tend,
       d.precip_liq_flux, d.precip_ice_flux, d.cld_frac_r, d.cld_frac_l, d.cld_frac_i,
       d.liq_ice_exchange, d.vap_liq_exchange, d.vap_ice_exchange, d.qv_prev, d.t_prev);
   }

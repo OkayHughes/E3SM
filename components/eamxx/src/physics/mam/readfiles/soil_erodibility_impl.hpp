@@ -3,8 +3,8 @@
 
 #include "share/grid/remap/identity_remapper.hpp"
 #include "share/grid/remap/refining_remapper_p2p.hpp"
-#include "share/io/scream_scorpio_interface.hpp"
-#include "share/util/scream_timing.hpp"
+#include "share/io/eamxx_scorpio_interface.hpp"
+#include "share/util/eamxx_timing.hpp"
 
 namespace scream {
 namespace soil_erodibility {
@@ -49,8 +49,6 @@ soilErodibilityFunctions<S, D>::create_horiz_remapper(
     remapper =
         std::make_shared<RefiningRemapperP2P>(horiz_interp_tgt_grid, map_file);
   }
-
-  remapper->registration_begins();
 
   const auto tgt_grid = remapper->get_tgt_grid();
 

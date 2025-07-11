@@ -2,8 +2,8 @@
 
 #include "data_interpolation_tests.hpp"
 
-#include "share/io/scream_io_utils.hpp"
-#include "share/io/scream_scorpio_interface.hpp"
+#include "share/io/eamxx_io_utils.hpp"
+#include "share/io/eamxx_scorpio_interface.hpp"
 #include "share/grid/point_grid.hpp"
 
 namespace scream {
@@ -73,7 +73,7 @@ TEST_CASE ("data_interpolation_setup")
     auto base_fields = create_fields(grid,true, int_same_as_mid,false);
     auto fields      = create_fields(grid,false,int_same_as_mid,false);
     auto ones        = create_fields(grid,false,int_same_as_mid,false);
-    for (const auto& f : ones) {
+    for (auto& f : ones) {
       f.deep_copy(1);
     }
     // Loop over time, and add 30 to the value for the first 6 months,

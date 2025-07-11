@@ -11,7 +11,7 @@
 #include "dynamics/homme/homme_dynamics_helpers.hpp"
 #include "dynamics/homme/homme_dimensions.hpp"
 #include "share/grid/se_grid.hpp"
-#include "share/util/scream_utils.hpp"
+#include "share/util/eamxx_utils.hpp"
 
 #include "ekat/ekat_pack_utils.hpp"
 #include "ekat/ekat_assert.hpp"
@@ -22,7 +22,7 @@ namespace {
 template<typename DataType>
 ::Homme::ExecViewUnmanaged<DataType>
 getHommeView(const scream::Field& f) {
-  auto p = f.get_header().get_parent().lock();
+  auto p = f.get_header().get_parent();
   auto scream_view = f.template get_view<DataType>();
   using homme_view_t = ::Homme::ExecViewUnmanaged<DataType>;
   if (p!=nullptr) {
@@ -127,13 +127,13 @@ initialize_device_variables()
     // A dynamic subfield will need some special treatment at runtime
     // Namely, we'll need to re-extract the view every time,
     // since the subview info may have changed
-    if (ph.get_parent().lock()) {
-      EKAT_REQUIRE_MSG (ph.get_parent().lock()->get_parent().lock()==nullptr,
+    if (ph.get_parent()) {
+      EKAT_REQUIRE_MSG (ph.get_parent()->get_parent()==nullptr,
           "Error! We do not support remapping of subfields of other subfields.\n");
       m_subfield_info_phys[i] = ph.get_alloc_properties().get_subview_info();
     }
-    if (dh.get_parent().lock()) {
-      EKAT_REQUIRE_MSG (dh.get_parent().lock()->get_parent().lock()==nullptr,
+    if (dh.get_parent()) {
+      EKAT_REQUIRE_MSG (dh.get_parent()->get_parent()==nullptr,
           "Error! We do not support remapping of subfields of other subfields.\n");
       m_subfield_info_dyn[i] = dh.get_alloc_properties().get_subview_info();
     }
@@ -302,7 +302,7 @@ remap_fwd_impl ()
 #endif
 #endif
 
-#ifdef KOKKOS_ENABLE_HIP
+#if defined KOKKOS_ENABLE_HIP || defined KOKKOS_ENABLE_SYCL
   const int team_size = std::min(256, std::min(128*m_num_phys_cols,32*(concurrency/this->m_num_fields+31)/32));
 #endif
 
@@ -328,19 +328,10 @@ remap_bwd_impl ()
   update_subfields_views(m_subfield_info_dyn,m_dyn_repo,m_tgt_fields);
   update_subfields_views(m_subfield_info_phys,m_phys_repo,m_src_fields);
 
-  using TeamPolicy = typename KT::TeamTagPolicy<RemapBwdTag>;
-
-  const auto concurrency = KT::ExeSpace().concurrency();
-#ifdef KOKKOS_ENABLE_CUDA
-  const int num_levs  = m_phys_grid->get_num_vertical_levels();
-  const int team_size = std::min(128,32*(int)ceil(((Real)num_levs)/32));
-#else
-  const int team_size = (concurrency<this->m_num_fields*m_num_phys_cols ? 1 : concurrency/(this->m_num_fields*m_num_phys_cols));
-#endif
-
   // TeamPolicy over m_num_phys_cols*this->m_num_fields. Unlike remap_fwd_impl,
   // here we do not require setting dyn=0, allowing us to extend the TeamPolicy
-  const TeamPolicy policy(this->m_num_fields*m_num_phys_cols,team_size);
+  using TeamPolicy = typename KT::TeamTagPolicy<RemapBwdTag>;
+  const TeamPolicy policy(this->m_num_fields*m_num_phys_cols,Kokkos::AUTO);
   Kokkos::parallel_for(policy, *this);
   Kokkos::fence();
 }

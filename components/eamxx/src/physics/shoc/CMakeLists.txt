@@ -86,7 +86,7 @@ if (NOT SCREAM_DEBUG)
   endif()
 endif()
 
-if (HIP_BUILD)
+if (Kokkos_ENABLE_HIP)
   #this is needed for crusher even with small kernels
   set_source_files_properties(shoc_diag_second_shoc_moments_disp.cpp  PROPERTIES COMPILE_FLAGS -O1)
 endif()
@@ -121,5 +121,7 @@ if (NOT SCREAM_LIB_ONLY)
   add_subdirectory(tests)
 endif()
 
-# Add this library to eamxx_physics
-target_link_libraries(eamxx_physics INTERFACE shoc)
+if (TARGET eamxx_physics)
+  # Add this library to eamxx_physics
+  target_link_libraries(eamxx_physics INTERFACE shoc)
+endif()

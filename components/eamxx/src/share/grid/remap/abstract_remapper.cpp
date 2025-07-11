@@ -11,20 +11,13 @@ AbstractRemapper (const grid_ptr_type& src_grid,
 }
 
 void AbstractRemapper::
-registration_begins () {
-  EKAT_REQUIRE_MSG(m_state==RepoState::Clean,
-      "Error! Cannot start registration on a non-clean repo.\n"
-      "       Did you call 'registration_begins' already?\n");
-
-  m_state = RepoState::Open;
-}
-
-void AbstractRemapper::
 register_field (const Field& src, const Field& tgt)
 {
-  EKAT_REQUIRE_MSG(m_state==RepoState::Open,
+  EKAT_REQUIRE_MSG(m_state!=RepoState::Closed,
       "Error! Cannot register fields in the remapper at this time.\n"
-      "       Did you forget to call 'registration_begins' or called 'registeration_ends' already?");
+      "       Did you already call 'registeration_ends'?");
+
+  m_state = RepoState::Open;
 
   EKAT_REQUIRE_MSG(src.is_allocated(), "Error! Source field is not yet allocated.\n");
   EKAT_REQUIRE_MSG(tgt.is_allocated(), "Error! Target field is not yet allocated.\n");
@@ -59,7 +52,7 @@ register_field (const Field& src, const Field& tgt)
   ++m_num_fields;
 }
 
-void AbstractRemapper::
+Field AbstractRemapper::
 register_field_from_src (const Field& src) {
   const auto& src_fid = src.get_header().get_identifier();
   const auto& tgt_fid = create_tgt_fid(src_fid);
@@ -71,9 +64,11 @@ register_field_from_src (const Field& src) {
   tgt.allocate_view();
 
   register_field(src,tgt);
+
+  return tgt;
 }
 
-void AbstractRemapper::
+Field AbstractRemapper::
 register_field_from_tgt (const Field& tgt) {
   const auto& tgt_fid = tgt.get_header().get_identifier();
   const auto& src_fid = create_src_fid(tgt_fid);
@@ -85,6 +80,8 @@ register_field_from_tgt (const Field& tgt) {
   src.allocate_view();
 
   register_field(src,tgt);
+
+  return src;
 }
 
 void AbstractRemapper::registration_ends ()
@@ -106,13 +103,11 @@ void AbstractRemapper::remap_fwd ()
       "Error! Cannot perform remapping at this time.\n"
       "       Did you forget to call 'registration_ends'?\n");
 
-  if (m_state!=RepoState::Clean) {
-    EKAT_REQUIRE_MSG (m_fwd_allowed,
-        "Error! Forward remap is not allowed by this remapper.\n");
-    EKAT_REQUIRE_MSG (not m_has_read_only_tgt_fields,
-        "Error! Forward remap IS allowed by this remapper, but some of the tgt fields are read-only\n");
-    remap_fwd_impl ();
-  }
+  EKAT_REQUIRE_MSG (m_fwd_allowed,
+      "Error! Forward remap is not allowed by this remapper.\n");
+  EKAT_REQUIRE_MSG (not m_has_read_only_tgt_fields,
+      "Error! Forward remap IS allowed by this remapper, but some of the tgt fields are read-only\n");
+  remap_fwd_impl ();
 }
 
 void AbstractRemapper::remap_bwd ()
@@ -121,13 +116,11 @@ void AbstractRemapper::remap_bwd ()
       "Error! Cannot perform remapping at this time.\n"
       "       Did you forget to call 'registration_ends'?\n");
 
-  if (m_state!=RepoState::Clean) {
-    EKAT_REQUIRE_MSG (m_bwd_allowed,
-        "Error! Backward remap is not allowed by this remapper.\n");
-    EKAT_REQUIRE_MSG (not m_has_read_only_src_fields,
-        "Error! Backward remap IS allowed by this remapper, but some of the src fields are read-only\n");
-    remap_bwd_impl ();
-  }
+  EKAT_REQUIRE_MSG (m_bwd_allowed,
+      "Error! Backward remap is not allowed by this remapper.\n");
+  EKAT_REQUIRE_MSG (not m_has_read_only_src_fields,
+      "Error! Backward remap IS allowed by this remapper, but some of the src fields are read-only\n");
+  remap_bwd_impl ();
 }
 
 void AbstractRemapper::
@@ -218,75 +211,7 @@ FieldLayout AbstractRemapper::
 create_layout (const FieldLayout& from_layout,
                const grid_ptr_type& to_grid) const
 {
-  using namespace ShortFieldTagsNames;
-
-
-  const bool midpoints = from_layout.has_tag(LEV);
-
-  auto fl_out = FieldLayout::invalid();
-  switch (from_layout.type()) {
-    case LayoutType::Scalar0D: [[ fallthrough ]]; 
-    case LayoutType::Vector0D: [[ fallthrough ]]; 
-    case LayoutType::Tensor0D:
-      // 0d layouts are the same on all grids
-      fl_out = from_layout;
-      break;
-    case LayoutType::Scalar1D:
-      // 1d layouts require the grid correct number of levs
-      fl_out = to_grid->get_vertical_layout(midpoints);
-      break;
-    case LayoutType::Vector1D:
-    {
-      auto vdim_idx  = from_layout.get_vector_component_idx();
-      auto vdim_name = from_layout.names()[vdim_idx];
-      auto vdim_len  = from_layout.get_vector_dim();
-      fl_out = to_grid->get_vertical_layout(midpoints,vdim_len,vdim_name);
-      break;
-    }
-    case LayoutType::Scalar2D:
-      fl_out = to_grid->get_2d_scalar_layout();
-      break;
-    case LayoutType::Vector2D:
-    {
-      auto vdim_idx  = from_layout.get_vector_component_idx();
-      auto vdim_name = from_layout.names()[vdim_idx];
-      auto vdim_len  = from_layout.get_vector_dim();
-      fl_out = to_grid->get_2d_vector_layout(vdim_len,vdim_name);
-      break;
-    }
-    case LayoutType::Tensor2D:
-    {
-      std::vector<std::string> tdims_names;
-      for (auto idx  : from_layout.get_tensor_components_ids()) {
-        tdims_names.push_back(from_layout.names()[idx]);
-      }   
-      fl_out = to_grid->get_2d_tensor_layout(from_layout.get_tensor_dims(),tdims_names);
-      break;
-    }
-    case LayoutType::Scalar3D:
-      fl_out = to_grid->get_3d_scalar_layout(midpoints);
-      break;
-    case LayoutType::Vector3D:
-    {
-      auto vdim_idx  = from_layout.get_vector_component_idx();
-      auto vdim_name = from_layout.names()[vdim_idx];
-      auto vdim_len  = from_layout.get_vector_dim();
-      fl_out = to_grid->get_3d_vector_layout(midpoints,vdim_len,vdim_name);
-      break;
-    }
-    case LayoutType::Tensor3D:
-    {
-      std::vector<std::string> tdims_names;
-      for (auto idx  : from_layout.get_tensor_components_ids()) {
-        tdims_names.push_back(from_layout.names()[idx]);
-      }   
-      fl_out = to_grid->get_3d_tensor_layout(midpoints,from_layout.get_tensor_dims(),tdims_names);
-    }
-    default:
-      EKAT_ERROR_MSG ("Layout not supported by this remapper.\n"
-                      " - layout: " + from_layout.to_string() + "\n");
-  }
-  return fl_out;
+  return to_grid->equivalent_layout(from_layout);
 }
 
 } // namespace scream
