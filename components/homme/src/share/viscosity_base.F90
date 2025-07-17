@@ -17,7 +17,7 @@ use dimensions_mod, only : np, nlev,qsize,nelemd
 use hybrid_mod, only : hybrid_t, hybrid_create
 use parallel_mod, only : parallel_t, abortmp
 use element_mod, only : element_t
-use derivative_mod, only : derivative_t, laplace_sphere_wk, vlaplace_sphere_wk, vorticity_sphere, derivinit, divergence_sphere
+use derivative_mod, only : derivative_t, laplace_sphere_wk, vlaplace_sphere_wk, vorticity_sphere, derivinit, divergence_sphere, gradient_sphere
 use edgetype_mod, only : EdgeBuffer_t, EdgeDescriptor_t
 use edge_mod, only : edgevpack, edgevunpack, edgevunpackmin, &
     edgevunpackmax, initEdgeBuffer, FreeEdgeBuffer, edgeSunpackmax, edgeSunpackmin,edgeSpack, &
@@ -44,6 +44,7 @@ public :: smooth_phis
 ! high-level routines uses only for I/O
 public :: compute_zeta_C0
 public :: compute_div_C0
+public :: compute_grad_C0
 interface compute_zeta_C0
     module procedure compute_zeta_C0_hybrid       ! hybrid version
     module procedure compute_zeta_C0_par          ! single threaded
@@ -51,6 +52,10 @@ end interface
 interface compute_div_C0
     module procedure compute_div_C0_hybrid
     module procedure compute_div_C0_par
+end interface
+interface compute_grad_C0
+    module procedure compute_grad_C0_hybrid
+    module procedure compute_grad_C0_par
 end interface
 interface make_c0
     module procedure make_c0_hybrid
@@ -362,6 +367,35 @@ call compute_zeta_C0_hybrid(zeta,elem,hybrid,1,nelemd,nt)
 
 end subroutine
 
+subroutine compute_grad_C0_par(grad,field,elem,par,nt)
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! compute C0 vorticity.  That is, solve:  
+!     < PHI, zeta > = <PHI, curl(elem%state%v >
+!
+!    input:  v (stored in elem()%, in lat-lon coordinates)
+!    output: zeta(:,:,:,:)   
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+type (parallel_t) :: par
+type (element_t)     , intent(in), target :: elem(:)
+real (kind=real_kind), dimension(np,np,nlev,nelemd) :: field
+real (kind=real_kind), dimension(np,np,nlev,2,nelemd) :: grad
+integer :: nt
+
+! local
+type (hybrid_t)              :: hybrid
+integer :: k,i,j,ie,ic
+type (derivative_t)          :: deriv
+
+! single thread
+hybrid = hybrid_create(par,0,1)
+
+call compute_grad_C0_hybrid(grad,field,elem,hybrid,1,nelemd,nt)
+
+end subroutine
+
+
+
 
 subroutine compute_div_C0_par(zeta,elem,par,nt)
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -387,6 +421,44 @@ type (derivative_t)          :: deriv
 hybrid = hybrid_create(par,0,1)
 
 call compute_div_C0_hybrid(zeta,elem,hybrid,1,nelemd,nt)
+
+end subroutine
+
+
+subroutine compute_grad_C0_hybrid(grad,field,elem,hybrid,nets,nete,nt)
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! compute C0 vorticity.  That is, solve:  
+!     < PHI, zeta > = <PHI, curl(elem%state%v >
+!
+!    input:  v (stored in elem()%, in lat-lon coordinates)
+!    output: zeta(:,:,:,:)   
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+type (hybrid_t)      , intent(in) :: hybrid
+type (element_t)     , intent(in), target :: elem(:)
+integer :: nt,nets,nete
+real (kind=real_kind), dimension(np,np,nlev,nets:nete) :: field
+real (kind=real_kind), dimension(np,np,nlev,2,nets:nete) :: grad
+
+! local
+integer :: k,i,j,ie,ic
+type (derivative_t)          :: deriv
+
+call derivinit(deriv)
+
+do ie=nets,nete
+#if (defined COLUMN_OPENMP)
+!$omp parallel do private(k)
+#endif
+do k=1,nlev
+   !    zeta(:,:,k,ie)=elem(ie)%state%zeta(:,:,k)
+   grad(:,:,k,:,ie)=gradient_sphere(field(:,:,k,ie),deriv,elem(ie)%Dinv)
+enddo
+enddo
+
+   call make_C0(grad(:,:,:,1,:),elem,hybrid,nets,nete)
+   call make_C0(grad(:,:,:,2,:),elem,hybrid,nets,nete)
 
 end subroutine
 
