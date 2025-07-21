@@ -15,7 +15,7 @@ module imex_mod
   use element_state,      only: max_itercnt, max_deltaerr, max_reserr
   use control_mod,        only: theta_hydrostatic_mode, qsplit
   use perf_mod,           only: t_startf, t_stopf
-  use deep_atm_mod,       only: g_from_phi, z_from_phi
+  use deep_atm_mod,       only: g_from_phi, z_from_phi, gravity_is_const
 #ifdef HOMMEXX_BFB_TESTING
           use iso_c_binding,      only: c_loc
 #endif
@@ -277,7 +277,11 @@ module imex_mod
           !call t_startf('get_dirk_jacobian_analyt')
           ! analytic J:
 #ifdef HOMMEDA
+          if (gravity_is_const) then
           call get_dirk_jacobian_deep(JacL,JacD,JacU,dt2,elem(ie)%state%dp3d(:,:,:,np1),dphi,elem(ie)%state%phis,pnh,1) 
+          else
+          call get_dirk_jacobian(JacL,JacD,JacU,dt2,elem(ie)%state%dp3d(:,:,:,np1),dphi,elem(ie)%state%phis,pnh,1) 
+          endif
 #else
           call get_dirk_jacobian(JacL,JacD,JacU,dt2,elem(ie)%state%dp3d(:,:,:,np1),dphi,elem(ie)%state%phis,pnh,1) 
 #endif
