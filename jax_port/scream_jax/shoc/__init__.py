@@ -30,7 +30,14 @@ from .length import (
     compute_shoc_mix_shoc_length,
     shoc_length,
 )
-from .second_moments import calc_shoc_vertflux, calc_shoc_varorcovar
+from .second_moments import (
+    calc_shoc_vertflux,
+    calc_shoc_varorcovar,
+    diag_second_moments,
+    diag_second_shoc_moments,
+    shoc_diag_second_moments_lbycond,
+    shoc_diag_second_moments_srf,
+)
 from .solver import (
     update_prognostics_implicit,
     vd_shoc_decomp,
