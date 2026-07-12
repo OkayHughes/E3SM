@@ -225,6 +225,7 @@ RRTMGP is complete through Tier-2.
 |---|---|---|---|
 | `scream_jax/driver.py` | EAMxx AD group semantics for [mac_mic + rrtmgp] (tests/multi-process/physics_only/shoc_cld_spa_p3_rrtmgp) | Claude (Fable 5) | **suite-golden** (`tests/test_suite_golden.py` vs multi-process pyeamxx run) |
 | `scream_jax/pyses_bridge.py` | pySEs <-> EAMxx state/forcing conversion + persistent coupler (new design, not a transcription) | Claude (Fable 5) | smoke-tested end-to-end (`tests/test_pyses_bridge.py`) |
+| `pyses_ext/finite_volume_grid_operational.py` | operational pg-N layer from `components/homme/src/share/gllfvremap_mod.F90` (dp-weighted remaps, CAAS limiter, theta-form T, hydrostatic dp_fv, D-tensor vector remap, tendency/state-asymmetric drivers), written to be appended to pySEs `dynamical_cores/finite_volume_grid.py` | Claude (Fable 5) | **property-tested** (`tests/test_operational_fv.py`, 18 tests, incl. proof that HOMME's constrained-projection FV->GLL operator equals pySEs' reference operator for nf>=2) |
 
 Winds need NO coordinate conversion: pySEs' `horizontal_wind` is
 physical lon-lat (u, v) m/s (verified in pySEs `initialization.py`
@@ -238,8 +239,13 @@ prescribed (no surface model); omega from pySEs vertical motion; a real
 coupled pySEs+scream_jax integration run (requires the pySEs
 environment); and a decision on physics-grid placement — the bridge
 currently runs physics directly on GLL columns (np4 physics), whereas
-SCREAM operationally runs physics on pg2 via HOMME `gllfvremap`
-(see the pg2 comparison notes in the 2026-07 session).
+SCREAM operationally runs physics on pg2 via HOMME `gllfvremap`.
+The operational remap layer is now implemented and property-tested in
+`pyses_ext/finite_volume_grid_operational.py` (merge target: pySEs
+`dynamical_cores/finite_volume_grid.py`); wiring it between the bridge
+and the physics driver (columnize `dyn_to_fv_phys` output instead of
+GLL state; feed physics increments to `fv_phys_to_dyn` + DSS) is the
+remaining integration step if pg2 physics is wanted.
 
 ## Pending (next in port order — see PORTING_PLAN.md §5)
 
