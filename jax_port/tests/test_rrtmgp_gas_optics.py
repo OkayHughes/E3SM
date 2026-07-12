@@ -71,8 +71,12 @@ def test_gas_optics_sw(kdists):
     # the g112 dataset integrates to the known total solar irradiance
     np.testing.assert_allclose(np.asarray(toa)[0].sum(), 1360.3756,
                                rtol=1e-6)
-    # optically thicker toward the surface for water-vapor bands
-    assert tau[0, -1, :].mean() > tau[0, 0, :].mean()
+    # visible band (16000-22650 cm^-1) in the mid-troposphere (away from
+    # the synthetic ozone maximum): gas absorption is weak there, so ssa
+    # (the Rayleigh fraction) should be near 1
+    kd_sw, _ = kdists
+    g0, g1 = kd_sw["band2gpt"][:, 10]
+    assert ssa[0, 35, g0:g1 + 1].max() > 0.9
 
 
 def test_gas_optics_lw(kdists):
