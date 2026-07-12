@@ -93,9 +93,14 @@ Whole-scheme validation target: `jax_port/golden/shoc_218x72_dt1800_5steps.npz`.
 | File | Source file(s) | Source @ | Translator | State |
 |---|---|---|---|---|
 | `scream_jax/p3/tables.py` | `impl/p3_init_impl.hpp` (ice table text parser, rain-table numerical integration, dnu) | d957a16d34 | Claude (Fable 5) | **kernel-golden** (computed rain tables match the C++ .dat8 binaries to 1e-14) |
+| `scream_jax/p3/table_lookups.py` | impl/ `p3_table3`, `p3_table_ice` (lookup + tri/quadrilinear apply) | d957a16d34 | Claude (Fable 5) | draft |
+| `scream_jax/p3/dsd.py` | impl/ `p3_dsd2` (`get_cloud_dsd2`, `get_rain_dsd2`) | d957a16d34 | Claude (Fable 5) | draft |
+| `scream_jax/p3/processes_warm.py` | impl/ autoconversion, cloud_rain_acc, droplet/rain self-collection, subgrid_variance_scaling, ice_nucleation, ice_classical_nucleation, cldliq/rain_imm_freezing, calc_rime_density | d957a16d34 | Claude (Fable 5) | draft |
 
-Next for P3 (bottom-up): table interpolation kernels (table3/table_ice),
-DSD parameters, the ~25 process-rate kernels, part1/2/3, sedimentation
+Next for P3 (bottom-up): remaining process-rate kernels (~15: ice
+collection/deposition/melting/wet-growth, relaxation timescales,
+evaporate_rain, conservation set, incloud mixing ratios,
+back_to_cell_average, update_prognostics), part1/2/3, sedimentation
 (upwind + adaptive substepping), p3_main, process pre/post, golden replay
 (`golden/p3_218x72_dt1800_5steps.npz`), swap test.
 
