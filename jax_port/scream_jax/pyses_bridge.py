@@ -11,12 +11,13 @@ SurfaceCouplingImporter play in SCREAM:
     simulator.send(forcing)   # applied via advance_coupling_step
 
 Conventions bridged:
-  - pySEs arrays are (elem, np, np, lev) on GLL points with contravariant
-    winds and DRY layer mass d_mass [Pa] + DRY-based mixing ratios;
-    EAMxx fields are (ncol, lev) with physical winds, WET pseudo_density
-    and WET mixing ratios. The caller converts winds with pySEs'
-    operations_2d.operators.{contravariant_to_physical,
-    physical_to_contravariant}; everything else happens here.
+  - pySEs arrays are (elem, np, np, lev) on GLL points with DRY layer
+    mass d_mass [Pa] + DRY-based mixing ratios; EAMxx fields are
+    (ncol, lev) with WET pseudo_density and WET mixing ratios. pySEs'
+    horizontal_wind is already PHYSICAL lon-lat (component 0 = zonal u,
+    1 = meridional v, m/s) — its operators convert to contravariant
+    internally — so wind components map to EAMxx horiz_winds directly
+    with no coordinate transform.
   - wet dp = dry dp * (1 + sum of dry-based water mixing ratios), and
     q_wet = q_dry * dp_dry / dp_wet — the same dp-based conversions the
     EAMxx process pre/post steps use.

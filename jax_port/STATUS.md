@@ -226,11 +226,20 @@ RRTMGP is complete through Tier-2.
 | `scream_jax/driver.py` | EAMxx AD group semantics for [mac_mic + rrtmgp] (tests/multi-process/physics_only/shoc_cld_spa_p3_rrtmgp) | Claude (Fable 5) | **suite-golden** (`tests/test_suite_golden.py` vs multi-process pyeamxx run) |
 | `scream_jax/pyses_bridge.py` | pySEs <-> EAMxx state/forcing conversion + persistent coupler (new design, not a transcription) | Claude (Fable 5) | smoke-tested end-to-end (`tests/test_pyses_bridge.py`) |
 
-Remaining before production pySEs runs: wind conversion is delegated to
-pySEs' `contravariant_to_physical`/`physical_to_contravariant` at the
-call site; surface fluxes/albedos are prescribed (no surface model);
-omega from pySEs vertical motion; and a real coupled pySEs+scream_jax
-integration run (requires the pySEs environment).
+Winds need NO coordinate conversion: pySEs' `horizontal_wind` is
+physical lon-lat (u, v) m/s (verified in pySEs `initialization.py`
+`wind = jnp.stack((u, v), axis=-1)`, the Coriolis term in
+`explicit_terms_theta.py`, and the operator signatures — divergence/
+vorticity call `physical_to_contravariant` internally), so components
+map 1:1 onto EAMxx `horiz_winds`.
+
+Remaining before production pySEs runs: surface fluxes/albedos are
+prescribed (no surface model); omega from pySEs vertical motion; a real
+coupled pySEs+scream_jax integration run (requires the pySEs
+environment); and a decision on physics-grid placement — the bridge
+currently runs physics directly on GLL columns (np4 physics), whereas
+SCREAM operationally runs physics on pg2 via HOMME `gllfvremap`
+(see the pg2 comparison notes in the 2026-07 session).
 
 ## Pending (next in port order — see PORTING_PLAN.md §5)
 
