@@ -97,10 +97,11 @@ Whole-scheme validation target: `jax_port/golden/shoc_218x72_dt1800_5steps.npz`.
 | `scream_jax/p3/dsd.py` | impl/ `p3_dsd2` (`get_cloud_dsd2`, `get_rain_dsd2`) | d957a16d34 | Claude (Fable 5) | draft |
 | `scream_jax/p3/processes_warm.py` | impl/ autoconversion, cloud_rain_acc, droplet/rain self-collection, subgrid_variance_scaling, ice_nucleation, ice_classical_nucleation, cldliq/rain_imm_freezing, calc_rime_density | d957a16d34 | Claude (Fable 5) | draft |
 | `scream_jax/p3/processes_ice.py` | impl/ ice_collection (3), ice_melting, ice_cldliq_wet_growth, ice_deposition_sublimation, ice/liq relaxation timescales, evaporate_rain (+3 helpers) | d957a16d34 | Claude (Fable 5) | draft |
+| `scream_jax/p3/conservation.py` | impl/ q/n conservation (6), ice_supersat_conservation, prevent_liq_supersaturation, impose_max_total_ni, incloud_mixingratios | d957a16d34 | Claude (Fable 5) | draft |
+| `scream_jax/p3/cell_average.py` | impl/ back_to_cell_average, get_time_space_phys_variables | d957a16d34 | Claude (Fable 5) | draft |
+| `scream_jax/p3/update.py` | impl/ update_prognostic_ice, update_prognostic_liquid | d957a16d34 | Claude (Fable 5) | draft |
 
-Next for P3 (bottom-up): conservation set, incloud mixing ratios,
-back_to_cell_average, get_time_space_phys_variables, update_prognostics,
-impose_max_total_ni, prevent_liq_supersaturation, part1/2/3, sedimentation
+Next for P3 (bottom-up): part1/2/3, sedimentation
 (upwind + adaptive substepping), p3_main, process pre/post, golden replay
 (`golden/p3_218x72_dt1800_5steps.npz`), swap test.
 
