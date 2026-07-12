@@ -60,6 +60,39 @@ if (EAMXX_ENABLE_PYTHON)
         LABELS "cldfrac;infrastructure"
         FIXTURES_REQUIRED "cldfrac_py;cldfrac_cpp")
 
+  #####################################
+  #        CldFraction (JAX)          #
+  #####################################
+  # JAX port from the jax_port/scream_jax package at the repo root
+  # (see jax_port/TEST_HARNESS_DESIGN.md, Tier 2). Requires `pip install jax`
+  # in the python used by the embedded interpreter.
+
+  set (POSTFIX jax)
+  set (PY_MODULE_NAME "cld_fraction_jax")
+  set (PY_MODULE_PATH ${SCREAM_BASE_DIR}/../../jax_port/scream_jax/adapters/eamxx)
+  set (PY_BACKEND "host")
+  configure_file(${CMAKE_CURRENT_SOURCE_DIR}/input.yaml
+                 ${CMAKE_CURRENT_BINARY_DIR}/input_jax.yaml)
+  configure_file(${CMAKE_CURRENT_SOURCE_DIR}/output.yaml
+                 ${CMAKE_CURRENT_BINARY_DIR}/output_jax.yaml)
+
+  CreateUnitTestFromExec(cld_fraction_standalone_jax cld_fraction_standalone
+    EXE_ARGS "--args -ifile=input_jax.yaml"
+    LABELS cld_fraction physics
+    FIXTURES_SETUP cldfrac_jax)
+
+  # Compare output of jax and cpp tests. This kernel is thresholds+max only,
+  # so even the JAX result is expected to be bitwise identical on CPU/x64.
+  set (SRC_FILE "cldfrac_standalone_output_cpp.INSTANT.nsteps_x1.np1.${RUN_T0}.nc")
+  set (TGT_FILE "cldfrac_standalone_output_jax.INSTANT.nsteps_x1.np1.${RUN_T0}.nc")
+  set (TEST_NAME cldfrac_standalone_cpp_vs_jax)
+  add_test (NAME ${TEST_NAME}
+            COMMAND cmake -P ${CMAKE_BINARY_DIR}/bin/CprncTest.cmake ${SRC_FILE} ${TGT_FILE}
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+  set_tests_properties(${TEST_NAME} PROPERTIES
+        LABELS "cldfrac;infrastructure"
+        FIXTURES_REQUIRED "cldfrac_jax;cldfrac_cpp")
+
   if (Kokkos_ENABLE_CUDA)
     # Also run with cupy instead of numpy
     set (PY_MODULE_NAME "cld_fraction_cupy")

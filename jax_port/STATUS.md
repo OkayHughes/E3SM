@@ -1,16 +1,12 @@
 # JAX Port — Status Ledger
 
-> **RESUME POINT (2026-07-11):** Docker env verified through *configure*; the
-> full `make -j6` rebuild in container `scream-dev` was interrupted mid-run
-> (laptop shutdown) after fixing the gfortran flag in
-> `components/eamxx/cmake/machine-files/copilot-testing.cmake`. To resume:
-> `docker start scream-dev`, then
-> `docker exec -w /work/E3SM/components/eamxx/ctest-build/copilot-testing/full_debug scream-dev make -j6`
-> (incremental — C++ objects are cached; the earlier failure was HOMME
-> Fortran, now fixed). Then `ctest -R cld_fraction`, then wire the JAX swap
-> test (TEST_HARNESS_DESIGN.md §5 Tier 2). Input data (~250 MB+) is cached in
-> `../e3sm-inputdata` on the host. Tier-0 pytest suite: 35 passing
-> (`uv venv && uv pip install jax pytest numpy; pytest jax_port/tests/`).
+> **M0 COMPLETE (2026-07-11):** The Docker environment is verified end-to-end
+> (configure → full build → ctest), EAMXX_ENABLE_PYTHON works in-container,
+> and `cldfrac_standalone_cpp_vs_jax` **passes with bitwise-identical (cprnc)
+> output** — the JAX swap toolchain is proven. Recipes: jax_port/dev/README.md.
+> Tier-0 pytest suite: 35 passing (`uv venv && uv pip install jax pytest
+> numpy; pytest jax_port/tests/`). Next: golden-data generators (M1), then
+> shoc/p3 kernel porting.
 
 One row per ported file. **A row here is a claim about provenance and
 validation state, nothing more** — `draft` code has been reviewed against the
@@ -41,8 +37,8 @@ source files changed upstream before trusting them.
 
 | File | Source file(s) | Source @ | Translator | State |
 |---|---|---|---|---|
-| `scream_jax/cld_fraction/main.py` | `components/eamxx/src/physics/cld_fraction/cld_fraction_main_impl.hpp` | d957a16d34 | Claude (Fable 5) | kernel-golden (vs upstream `cld_fraction_numpy.py`; C++ swap test pending) |
-| `scream_jax/adapters/eamxx/cld_fraction_jax.py` | calling convention of `cld_fraction_numpy.py` / `eamxx_cld_fraction_process_interface.cpp` | d957a16d34 | Claude (Fable 5) | draft |
+| `scream_jax/cld_fraction/main.py` | `components/eamxx/src/physics/cld_fraction/cld_fraction_main_impl.hpp` | d957a16d34 | Claude (Fable 5) | **swap-tested** (`cldfrac_standalone_cpp_vs_jax`, cprnc-BFB) |
+| `scream_jax/adapters/eamxx/cld_fraction_jax.py` | calling convention of `cld_fraction_numpy.py` / `eamxx_cld_fraction_process_interface.cpp` | d957a16d34 | Claude (Fable 5) | **swap-tested** |
 
 ## tms/
 
@@ -56,5 +52,7 @@ source files changed upstream before trusting them.
 
 | Item | State |
 |---|---|
-| Docker build/test environment (`jax_port/dev/`) | verified through configure+build+ctest? — in progress |
-| Tier-0 pytest scaffolding (`jax_port/tests/`) | property tests only; golden-data generators not yet written |
+| Docker build/test environment (`jax_port/dev/`) | **verified**: configure + full build + ctest, C++ and Python paths |
+| EAMxx Python swap path (`EAMXX_ENABLE_PYTHON` + adapter) | **verified** via `cldfrac_standalone_cpp_vs_jax` (BFB) |
+| cld_fraction JAX swap test (`eamxx/tests/single-process/cld_fraction`) | added on this branch, passing |
+| Tier-0 pytest scaffolding (`jax_port/tests/`) | 35 property/cross-check tests passing; golden-data generators not yet written |

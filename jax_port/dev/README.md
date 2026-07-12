@@ -72,7 +72,18 @@ Container stopped/rebooted host: `docker start scream-dev`.
   in-container and it writes a `url.https://github.com/.insteadOf` rewrite
   into the *mounted repo's* `.git/config` — delete that line on the host if
   you use SSH remotes.
-- **For the JAX harness** (later milestones): `pip install jax` in the
-  container, and reconfigure with `EAMXX_ENABLE_PYTHON=ON` /
-  `EAMXX_ENABLE_PYSCREAM=ON` (plus pybind11/nanobind, `pip install nanobind
-  mpi4py`). Documented in TEST_HARNESS_DESIGN.md §5.
+- **For the JAX swap harness** (Tier 2): the image already ships
+  python3-dev, pybind11, jax, pytest. Configure with:
+
+  ```bash
+  docker exec -w /work/E3SM/components/eamxx scream-dev \
+      ./scripts/test-all-eamxx -m copilot-testing -t dbg --config-only \
+      -c EAMXX_ENABLE_PYTHON=ON -c Python_EXECUTABLE=/usr/bin/python3
+  ```
+
+  (both `-c` options are required; the cmake in src/share/core errors
+  without an explicit `Python_EXECUTABLE`). Then rebuild and run e.g.
+  `ctest -R cld_fraction` — the `cldfrac_standalone_cpp_vs_jax` test
+  compares the JAX adapter against the C++ implementation.
+  For the pyeamxx driver (Bridge B) additionally configure
+  `EAMXX_ENABLE_PYSCREAM=ON` (needs `pip install nanobind mpi4py`).

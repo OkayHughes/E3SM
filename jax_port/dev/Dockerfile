@@ -16,7 +16,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         sudo git ca-certificates curl wget openssh-client libxml2-utils \
         gfortran gcc g++ cmake make m4 \
-        python3 python3-pip python3-venv \
+        python3 python3-pip python3-venv python3-dev \
         libopenmpi-dev openmpi-bin \
         libnetcdf-dev libnetcdff-dev \
         libboost-dev libyaml-cpp-dev \
@@ -68,7 +68,12 @@ ENV NETCDF_PATH=/usr \
 # single-purpose, so let pip install into the system environment. The env var
 # also makes the pip step inside setup-copilot-env.sh work if it is re-run.
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
-RUN python3 -m pip install --no-cache-dir psutil pyyaml netCDF4 packaging
+# Base EAMxx deps plus the embedded-Python/JAX harness deps: pybind11 for
+# EAMXX_ENABLE_PYTHON, jax/pytest for the scream_jax swap tests (Tier 2 in
+# jax_port/TEST_HARNESS_DESIGN.md).
+RUN python3 -m pip install --no-cache-dir \
+        psutil pyyaml netCDF4 packaging \
+        "pybind11[global]" jax pytest
 
 # OpenMPI quality-of-life inside containers: ctest launches mpiexec as root,
 # and the CMA/vader single-copy path needs ptrace caps Docker doesn't grant.
