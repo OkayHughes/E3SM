@@ -1,5 +1,17 @@
 # JAX Port — Status Ledger
 
+> **RESUME POINT (2026-07-11):** Docker env verified through *configure*; the
+> full `make -j6` rebuild in container `scream-dev` was interrupted mid-run
+> (laptop shutdown) after fixing the gfortran flag in
+> `components/eamxx/cmake/machine-files/copilot-testing.cmake`. To resume:
+> `docker start scream-dev`, then
+> `docker exec -w /work/E3SM/components/eamxx/ctest-build/copilot-testing/full_debug scream-dev make -j6`
+> (incremental — C++ objects are cached; the earlier failure was HOMME
+> Fortran, now fixed). Then `ctest -R cld_fraction`, then wire the JAX swap
+> test (TEST_HARNESS_DESIGN.md §5 Tier 2). Input data (~250 MB+) is cached in
+> `../e3sm-inputdata` on the host. Tier-0 pytest suite: 35 passing
+> (`uv venv && uv pip install jax pytest numpy; pytest jax_port/tests/`).
+
 One row per ported file. **A row here is a claim about provenance and
 validation state, nothing more** — `draft` code has been reviewed against the
 C++ by its translator but has passed no numerical comparison.
@@ -31,6 +43,12 @@ source files changed upstream before trusting them.
 |---|---|---|---|---|
 | `scream_jax/cld_fraction/main.py` | `components/eamxx/src/physics/cld_fraction/cld_fraction_main_impl.hpp` | d957a16d34 | Claude (Fable 5) | kernel-golden (vs upstream `cld_fraction_numpy.py`; C++ swap test pending) |
 | `scream_jax/adapters/eamxx/cld_fraction_jax.py` | calling convention of `cld_fraction_numpy.py` / `eamxx_cld_fraction_process_interface.cpp` | d957a16d34 | Claude (Fable 5) | draft |
+
+## tms/
+
+| File | Source file(s) | Source @ | Translator | State |
+|---|---|---|---|---|
+| `scream_jax/tms/main.py` | `components/eamxx/src/physics/tms/impl/compute_tms_impl.hpp` | d957a16d34 | Claude (Fable 5) | draft |
 
 ## Pending (next in port order — see PORTING_PLAN.md §5)
 

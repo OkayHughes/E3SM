@@ -7,17 +7,11 @@ include (${EKAT_MACH_FILES_PATH}/kokkos/openmp.cmake)
 set (EKAT_TEST_LAUNCHER_MANAGE_RESOURCES True CACHE BOOL "")
 
 # -fallow-argument-mismatch is needed for gfortran >= 10 to compile legacy Fortran code.
-# Older versions do not recognise this flag.
-if (CMAKE_Fortran_COMPILER_ID STREQUAL "GNU"
-    AND CMAKE_Fortran_COMPILER_VERSION VERSION_GREATER_EQUAL 10)
-  if (CMAKE_Fortran_FLAGS)
-    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -fallow-argument-mismatch"
-        CACHE STRING "Fortran compiler flags" FORCE)
-  else()
-    set(CMAKE_Fortran_FLAGS "-fallow-argument-mismatch"
-        CACHE STRING "Fortran compiler flags" FORCE)
-  endif()
-endif()
+# NOTE: set unconditionally (as on mappy/weaver): this file is processed as a
+# -C initial cache, BEFORE compiler detection, so guards on
+# CMAKE_Fortran_COMPILER_ID/VERSION can never fire here.
+set(CMAKE_Fortran_FLAGS "-fallow-argument-mismatch"
+    CACHE STRING "Fortran compiler flags" FORCE)
 
 # Input data directory (set by setup-copilot-env.sh or agent)
 if (DEFINED ENV{SCREAM_INPUT_ROOT})
