@@ -16,6 +16,7 @@ Conventions (identical to EAMxx/C++):
 """
 
 from . import constants
+from .assumed_pdf import shoc_assumed_pdf
 from .energy import (
     shoc_energy_fixer,
     shoc_energy_integrals,
@@ -45,6 +46,11 @@ from .solver import (
 )
 from .surface import shoc_diag_obklen
 from .thermo import compute_shoc_vapor, compute_shoc_temperature
+from .third_moments import (
+    clipping_diag_third_shoc_moments,
+    compute_diag_third_shoc_moment,
+    diag_third_shoc_moments,
+)
 from .tke import (
     adv_sgs_tke,
     check_tke,

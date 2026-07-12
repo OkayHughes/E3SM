@@ -60,10 +60,11 @@ source files changed upstream before trusting them.
 | `scream_jax/shoc/surface.py` | impl/ `shoc_diag_obklen` | d957a16d34 | Claude (Fable 5) | draft |
 | `scream_jax/shoc/second_moments.py` | impl/ `shoc_calc_shoc_vertflux`, `shoc_calc_shoc_varorcovar`, `shoc_diag_second_moments{,_srf,_lbycond,_ubycond}`, `shoc_diag_second_shoc_moments` (driver) | d957a16d34 | Claude (Fable 5) | draft |
 | `scream_jax/shoc/solver.py` | impl/ `shoc_tridiag_solver` (`vd_shoc_decomp`/`vd_shoc_solve`), `shoc_update_prognostics_implicit` | d957a16d34 | Claude (Fable 5) | draft |
+| `scream_jax/shoc/third_moments.py` | impl/ `shoc_compute_diag_third_shoc_moment`, `shoc_clipping_diag_third_shoc_moments`, `shoc_diag_third_shoc_moments` (driver) | d957a16d34 | Claude (Fable 5) | draft |
+| `scream_jax/shoc/assumed_pdf.py` | impl/ `shoc_assumed_pdf` (driver) + 12 `shoc_assumed_pdf_*` kernels | d957a16d34 | Claude (Fable 5) | draft |
 
-Remaining SHOC kernels (in port order): third-moment chain (3 kernels),
-assumed-PDF chain (13 kernels),
-pblintd chain (6), `shoc_main` driver, process-interface pre/post.
+Remaining SHOC kernels (in port order): pblintd chain (6), `shoc_main`
+driver, process-interface pre/post.
 Whole-scheme validation target: `jax_port/golden/shoc_218x72_dt1800_5steps.npz`.
 
 ## Pending (next in port order — see PORTING_PLAN.md §5)
