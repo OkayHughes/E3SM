@@ -152,6 +152,22 @@ Notes:
 
 P3 is complete through Tier-2.
 
+> **PHYSICS SUITE ASSEMBLED + pySEs BRIDGE (2026-07-12):**
+> `scream_jax.driver.ScreamPhysics` assembles the validated chain in
+> EAMxx AD order — [mac_mic(shoc -> cld_fraction -> spa -> p3, 6
+> subcycles) + rrtmgp] with prescribed CCN (SPA -> P3) and aerosol
+> optics (SPA -> RRTMGP) — and replays a multi-process pyeamxx golden
+> run within the suite's inherent divergence envelope (control: the C++
+> suite vs itself under a 1e-6 T perturbation shows the same
+> binary-cldfrac flip growth; a wiring error shows a systematic
+> ~100%-of-points signature, which is how this test caught a missing
+> aerosol-optics connection). `scream_jax.pyses_bridge` converts pySEs
+> state (dry mass/dry mixing ratios, GLL layout) <-> EAMxx fields,
+> holds physics-internal persistent state, and returns FT/FU/FV/FQ
+> tendencies for `advance_coupling_step`; end-to-end coupler smoke
+> passes on real IC thermodynamics. pyeamxx gained group-process
+> support (one-line factory registration). Local pytest: 133 passing.
+>
 > **SPA TIER-2 SWAP-TESTED (2026-07-12):** `spa_standalone_cpp_vs_jax`
 > passes in-container at 1e-10 tolerance (all 9 spa standalone tests
 > pass). Tier-1 golden replay matches all five prescribed-aerosol
@@ -203,8 +219,18 @@ RRTMGP is complete through Tier-2.
 | `scream_jax/spa/process.py` | `eamxx_spa_process_interface.cpp`, `share/algorithm/eamxx_data_interpolation.cpp`, `share/remap/vertical_remapper.cpp`, ekat LinInterp | d957a16d34 | Claude (Fable 5) | **swap-tested** (`spa_standalone_cpp_vs_jax`, 1e-10 tol; Tier-1 replay 6e-15) |
 | `scream_jax/adapters/eamxx/spa_jax.py` | py_module_call in `eamxx_spa_process_interface.cpp` (this branch) | d957a16d34 | Claude (Fable 5) | **swap-tested** |
 
-Next: pySEs assembly of the validated chain
-(sc_import -> [tms] -> shoc -> cld_fraction -> spa -> p3 + rrtmgp -> sc_export).
+## driver / pySEs bridge
+
+| File | Source / role | Translator | State |
+|---|---|---|---|
+| `scream_jax/driver.py` | EAMxx AD group semantics for [mac_mic + rrtmgp] (tests/multi-process/physics_only/shoc_cld_spa_p3_rrtmgp) | Claude (Fable 5) | **suite-golden** (`tests/test_suite_golden.py` vs multi-process pyeamxx run) |
+| `scream_jax/pyses_bridge.py` | pySEs <-> EAMxx state/forcing conversion + persistent coupler (new design, not a transcription) | Claude (Fable 5) | smoke-tested end-to-end (`tests/test_pyses_bridge.py`) |
+
+Remaining before production pySEs runs: wind conversion is delegated to
+pySEs' `contravariant_to_physical`/`physical_to_contravariant` at the
+call site; surface fluxes/albedos are prescribed (no surface model);
+omega from pySEs vertical motion; and a real coupled pySEs+scream_jax
+integration run (requires the pySEs environment).
 
 ## Pending (next in port order — see PORTING_PLAN.md §5)
 
