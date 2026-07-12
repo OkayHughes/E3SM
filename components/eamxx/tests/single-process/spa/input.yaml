@@ -12,6 +12,9 @@ eamxx:
   atm_procs_list: [spa]
   spa:
     spa_data_file: ${SCREAM_DATA_DIR}/init/spa_file_unified_and_complete_ne2np4L72_20231222.nc
+    py_module_name: ${PY_MODULE_NAME}
+    py_module_path: ${PY_MODULE_PATH}
+    py_backend: ${PY_BACKEND}
 
 grids_manager:
   type: mesh_free
@@ -28,5 +31,5 @@ initial_conditions:
 
 # The parameters for I/O control
 scorpio:
-  output_yaml_files: ["output.yaml"]
+  output_yaml_files: ["output${POSTFIX}.yaml"]
 ...

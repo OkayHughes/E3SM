@@ -4,6 +4,10 @@
 #include "share/scorpio_interface/eamxx_scorpio_interface.hpp"
 #include "share/property_checks/field_within_interval_check.hpp"
 
+#ifdef EAMXX_HAS_PYTHON
+#include "share/atm_process/atmosphere_process_pyhelpers.hpp"
+#endif
+
 #include <ekat_assert.hpp>
 #include <ekat_units.hpp>
 
@@ -60,6 +64,19 @@ void SPA::initialize_impl (const RunType /* run_type */)
 {
   using namespace ekat::units;
   using namespace ShortFieldTagsNames;
+
+#ifdef EAMXX_HAS_PYTHON
+  if (has_py_module()) {
+    // The python implementation reads/interpolates the data itself
+    EKAT_REQUIRE_MSG (m_params.get<std::string>("py_backend","host")=="host",
+        "Error! The SPA python bridge only supports the host backend.\n");
+    EKAT_REQUIRE_MSG (m_params.get<std::string>("spa_remap_file","")=="" and
+                      m_iop_data_manager==nullptr,
+        "Error! The SPA python bridge does not support horiz remapping or IOP.\n");
+    py_module_call("init", m_params.get<std::string>("spa_data_file"));
+    return;
+  }
+#endif
 
   // NOTE: SPA does not have an internal persistent state, so run_type is irrelevant
 
@@ -141,6 +158,27 @@ void SPA::initialize_impl (const RunType /* run_type */)
 // =========================================================================================
 void SPA::run_impl (const double /* dt */)
 {
+#ifdef EAMXX_HAS_PYTHON
+  if (has_py_module()) {
+    // Swap the whole step (time interpolation + vertical remap) with the
+    // python implementation (see jax_port/TEST_HARNESS_DESIGN.md and
+    // scream_jax/spa/process.py)
+    const double doy = end_of_step_ts().frac_of_year_in_days();
+    get_field_in("p_mid").sync_to_host();
+    for (auto n : {"nccn","aero_g_sw","aero_ssa_sw","aero_tau_sw","aero_tau_lw"}) {
+      get_field_out(n).sync_to_host();
+    }
+    py_module_call("main", doy,
+        get_py_field_host("p_mid"),
+        get_py_field_host("nccn"),
+        get_py_field_host("aero_g_sw"), get_py_field_host("aero_ssa_sw"),
+        get_py_field_host("aero_tau_sw"), get_py_field_host("aero_tau_lw"));
+    for (auto n : {"nccn","aero_g_sw","aero_ssa_sw","aero_tau_sw","aero_tau_lw"}) {
+      get_field_out(n).sync_to_dev();
+    }
+    return;
+  }
+#endif
   m_data_interpolation->run(end_of_step_ts());
 }
 

@@ -152,6 +152,15 @@ Notes:
 
 P3 is complete through Tier-2.
 
+> **SPA TIER-2 SWAP-TESTED (2026-07-12):** `spa_standalone_cpp_vs_jax`
+> passes in-container at 1e-10 tolerance (all 9 spa standalone tests
+> pass). Tier-1 golden replay matches all five prescribed-aerosol
+> fields to <=6e-15. The port covers the modern DataInterpolation path:
+> yearly-periodic time interpolation, Dynamic3DRef vertical remap
+> (p = PS*hybm + P0*hyam, ekat LinInterp + P0 extrapolation) and the
+> repairable within-interval postcondition clamps (the data files
+> contain g > 1 points that the C++ silently repairs).
+>
 > **RRTMGP TIER-2 SWAP-TESTED (2026-07-12):** `rrtmgp_standalone_cpp_vs_jax`
 > passes in-container: the whole radiation step swapped for scream_jax via
 > the embedded-Python bridge over the standalone multi-step run
@@ -185,7 +194,17 @@ compiled in the dev container, on identical inputs, via the dumpers in
 | `scream_jax/rrtmgp/process.py` | eamxx_rrtmgp_process_interface.cpp run_impl | d957a16d34 | Claude (Fable 5) | **swap-tested** (`rrtmgp_standalone_cpp_vs_jax`) |
 | `scream_jax/adapters/eamxx/rrtmgp_jax.py` | py_module_call in eamxx_rrtmgp_process_interface.cpp (this branch) | d957a16d34 | Claude (Fable 5) | **swap-tested** |
 
-RRTMGP is complete through Tier-2. Next: SPA, then pySEs assembly.
+RRTMGP is complete through Tier-2.
+
+## spa/ (complete through Tier-2)
+
+| File | Source file(s) | Source @ | Translator | State |
+|---|---|---|---|---|
+| `scream_jax/spa/process.py` | `eamxx_spa_process_interface.cpp`, `share/algorithm/eamxx_data_interpolation.cpp`, `share/remap/vertical_remapper.cpp`, ekat LinInterp | d957a16d34 | Claude (Fable 5) | **swap-tested** (`spa_standalone_cpp_vs_jax`, 1e-10 tol; Tier-1 replay 6e-15) |
+| `scream_jax/adapters/eamxx/spa_jax.py` | py_module_call in `eamxx_spa_process_interface.cpp` (this branch) | d957a16d34 | Claude (Fable 5) | **swap-tested** |
+
+Next: pySEs assembly of the validated chain
+(sc_import -> [tms] -> shoc -> cld_fraction -> spa -> p3 + rrtmgp -> sc_export).
 
 ## Pending (next in port order — see PORTING_PLAN.md §5)
 

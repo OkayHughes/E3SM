@@ -72,6 +72,13 @@ PROC_CONFIGS = {
             "phis": 0.0,  # no topography file in this harness; recorded in metadata
         },
     },
+    "spa": {
+        "params": {
+            "spa_data_file":
+                "/work/e3sm-inputdata/atm/scream/init/spa_file_unified_and_complete_ne2np4L72_20231222.nc",
+        },
+        "ic_fill": {},
+    },
     "rrtmgp": {
         "params": {
             # mirror tests/single-process/rrtmgp/input.yaml, but update

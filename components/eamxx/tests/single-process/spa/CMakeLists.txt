@@ -17,6 +17,7 @@ set (ATM_TIME_STEP 864000)
 set (RUN_T0 2021-10-12-45000)
 
 ## Copy (and configure) yaml files needed by tests
+set (POSTFIX "")
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/input.yaml
                ${CMAKE_CURRENT_BINARY_DIR}/input.yaml)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/output.yaml
@@ -48,4 +49,39 @@ if (SCREAM_ENABLE_BASELINE_TESTS)
   # Note: one is enough, since we already check that np1 is BFB with npX
   set (OUT_FILE ${TEST_BASE_NAME}_output.INSTANT.nsteps_x1.np${TEST_RANK_END}.${RUN_T0}.nc)
   CreateBaselineTest(${TEST_BASE_NAME} ${TEST_RANK_END} ${OUT_FILE} ${FIXTURES_BASE_NAME})
+endif()
+
+if (EAMXX_ENABLE_PYTHON)
+  #####################################
+  #             SPA (JAX)             #
+  #####################################
+  # Swap the whole SPA step (time interpolation + vertical remap) for the
+  # scream_jax implementation and compare against the C++ run.
+
+  set (POSTFIX _jax)
+  set (PY_MODULE_NAME "spa_jax")
+  set (PY_MODULE_PATH ${SCREAM_BASE_DIR}/../../jax_port/scream_jax/adapters/eamxx)
+  set (PY_BACKEND "host")
+  configure_file(${CMAKE_CURRENT_SOURCE_DIR}/input.yaml
+                 ${CMAKE_CURRENT_BINARY_DIR}/input_jax.yaml)
+  configure_file(${CMAKE_CURRENT_SOURCE_DIR}/output.yaml
+                 ${CMAKE_CURRENT_BINARY_DIR}/output_jax.yaml)
+
+  CreateUnitTestFromExec(${TEST_BASE_NAME}_jax ${TEST_BASE_NAME}
+    EXE_ARGS "--args -ifile=input_jax.yaml"
+    LABELS spa physics
+    FIXTURES_SETUP spa_jax)
+
+  # Tier-1 golden replay shows machine-precision agreement, so tight
+  # tolerances apply.
+  set (SRC_FILE "${TEST_BASE_NAME}_output.INSTANT.nsteps_x1.np1.${RUN_T0}.nc")
+  set (TGT_FILE "${TEST_BASE_NAME}_jax_output.INSTANT.nsteps_x1.np1.${RUN_T0}.nc")
+  add_test (NAME ${TEST_BASE_NAME}_cpp_vs_jax
+            COMMAND ${Python_EXECUTABLE} ${SCREAM_BASE_DIR}/../../jax_port/harness/compare_nc_tolerant.py
+            -s ${SRC_FILE} -t ${TGT_FILE} --tol 1e-10 --hard-tol 1e-8 --max-frac 1e-4
+            -v nccn aero_g_sw aero_ssa_sw aero_tau_sw aero_tau_lw
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+  set_tests_properties(${TEST_BASE_NAME}_cpp_vs_jax PROPERTIES
+        LABELS "spa;infrastructure"
+        FIXTURES_REQUIRED "spa_jax;${FIXTURES_BASE_NAME}_np1_omp1")
 endif()
