@@ -120,7 +120,25 @@ pending.
 
 ## Environment
 
-`uv venv` in `jax_port_eam/`; `uv pip install numpy jax pytest netCDF4
-meson ninja`. gfortran from Homebrew (15.x verified). Everything runs
-locally — no container needed (the scream-dev container remains
-available if a build ever needs the E3SM CMake infrastructure).
+Two-sided setup, learned the hard way:
+
+- **Fortran side (f2py builds + golden generation): the scream-dev
+  Linux container.** `docker exec -w /work/E3SM/jax_port_eam/harness
+  scream-dev python3 build_<scheme>.py` (container has gfortran 13.3,
+  python3.12, numpy 2.5, meson+ninja pip-installed). Native macOS f2py
+  is a trap: (a) rebuilding a .so over the same path wedges dlopen in
+  uninterruptible kernel waits via the stale kernel signature cache
+  (fbuild replaces via new-inode rename, but even then processes died
+  silently), (b) gfortran needs SDKROOT to link at all. The container
+  sidesteps all of it and matches E3SM's supported toolchain family.
+- **JAX side (ports + pytest): host venv.** `uv venv` in
+  `jax_port_eam/`; `uv pip install numpy jax pytest netCDF4`. Goldens
+  are plain .npz — generated in the container, replayed on the host.
+
+f2py specifics baked into `harness/fbuild.py`: kinds like
+`r8 = selected_real_kind(12)` are NOT resolved by f2py's crackfortran
+— without a kind map the wrappers silently become float32 and produce
+garbage (checked: `array('d')` must appear in the wrapper docstrings);
+`harness/f2py_f2cmap` maps `r8`/`shr_kind_r8` to double and is passed
+via `--f2cmap`. Drivers declare `r8` locally (a use-associated kind is
+also invisible to crackfortran).
