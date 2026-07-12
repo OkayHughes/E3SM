@@ -1,5 +1,12 @@
 # JAX Port — Status Ledger
 
+> **SHOC TIER-1 VALIDATED (2026-07-12):** The complete SHOC port (all ~57
+> kernels, shoc_main, process pre/post) replays the EAMxx golden archive —
+> 5 host steps x 6 subcycles — with max relative error <= 7e-8 on every
+> field (most 1e-9..1e-14; single-subcycle agreement is 1e-13..1e-16). The
+> only caveat is a documented knife-edge `shoc_ql2 != 0` branch that flips
+> on <0.1% of points. Run: `pytest jax_port/tests/test_shoc_golden.py -s`.
+>
 > **M0 COMPLETE (2026-07-11):** The Docker environment is verified end-to-end
 > (configure → full build → ctest), EAMXX_ENABLE_PYTHON works in-container,
 > and `cldfrac_standalone_cpp_vs_jax` **passes with bitwise-identical (cprnc)
@@ -65,10 +72,12 @@ source files changed upstream before trusting them.
 | `scream_jax/shoc/pblintd.py` | impl/ `shoc_pblintd_init_pot`, `pblintd_height`, `pblintd_surf_temp`, `pblintd_check_pblh`, `shoc_pblintd_cldcheck`, `pblintd` (driver) | d957a16d34 | Claude (Fable 5) | draft |
 | `scream_jax/shoc/main.py` | impl/ `shoc_main` (`shoc_init` + `shoc_main_internal` loop) | d957a16d34 | Claude (Fable 5) | draft (whole-scheme water/energy budget invariants pass) |
 
-All ~57 SHOC kernels AND the `shoc_main` driver are ported. Remaining:
-process-interface pre/post conversions (`eamxx_shoc_process_interface.cpp`
-SHOCPreprocess/SHOCPostprocess), then Tier-1 golden validation against
-`jax_port/golden/shoc_218x72_dt1800_5steps.npz`.
+| `scream_jax/shoc/process.py` | `eamxx_shoc_process_interface.hpp` (SHOCPreprocess/SHOCPostprocess) + run_impl setup | d957a16d34 | Claude (Fable 5) | **kernel-golden** |
+
+The whole SHOC package is **kernel-golden**: `test_shoc_golden.py` replays
+`golden/shoc_218x72_dt1800_5steps.npz` end-to-end (see banner above). Next
+for SHOC: the Tier-2 in-situ swap test (adapter + input_jax.yaml + a
+`has_py_module` branch in the C++ interface).
 Whole-scheme validation target: `jax_port/golden/shoc_218x72_dt1800_5steps.npz`.
 
 ## Pending (next in port order — see PORTING_PLAN.md §5)
@@ -90,4 +99,7 @@ stride-units bug** (strides passed in bytes where DLPack requires elements —
 corrupted memory on any in-place write through `Field.get()`); field/group
 creation now routed through a real `FieldManager` so processes with
 (monolithic) group requests work (shoc); single-process tracer-group
-defaulting mirroring `pre_process_tracer_requests`.
+defaulting mirroring `pre_process_tracer_requests`; **subfield data-pointer
+bug** (`get()` used the parent block's base pointer for monolithic-group
+subfields, so qv/qc/tke snapshots all aliased the block start — data
+pointer now taken from the typed subview).

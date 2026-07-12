@@ -88,6 +88,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("process", choices=sorted(PROC_CONFIGS))
     ap.add_argument("--steps", type=int, default=5)
+    ap.add_argument("--subcycles", type=int, default=None,
+                    help="override number_of_subcycles in the process params")
     ap.add_argument("--dt", type=int, default=DT)
     ap.add_argument("-o", "--output", required=True)
     ap.add_argument("--build-dir", default=BUILD_DIR)
@@ -117,6 +119,8 @@ def main():
 
 def run(args, pyeamxx):
     cfg = PROC_CONFIGS[args.process]
+    if args.subcycles is not None:
+        cfg = dict(cfg, params=dict(cfg["params"], number_of_subcycles=args.subcycles))
 
     pyeamxx.create_grids_manager(NCOLS, NLEVS, args.ic_file)
     proc = pyeamxx.AtmProc(dict(cfg["params"]), args.process)

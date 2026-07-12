@@ -61,16 +61,13 @@ struct PyField {
     void* data = nullptr;
     switch (fid.data_type()) {
       case DataType::IntType:
-        dt = get_dt_and_set_strides<int>(strides);
-        data = f.get_internal_view_data_unsafe<int,Host>();
+        dt = get_dt_strides_data<int>(strides, data);
         break;
       case DataType::FloatType:
-        dt = get_dt_and_set_strides<float>(strides);
-        data = f.get_internal_view_data_unsafe<float,Host>();
+        dt = get_dt_strides_data<float>(strides, data);
         break;
       case DataType::DoubleType:
-        dt = get_dt_and_set_strides<double>(strides);
-        data = f.get_internal_view_data_unsafe<double,Host>();
+        dt = get_dt_strides_data<double>(strides, data);
         break;
       default:
         EKAT_ERROR_MSG ("Unrecognized/unsupported data type.\n");
@@ -92,8 +89,12 @@ struct PyField {
   }
 private:
 
+  // NOTE: both the strides AND the data pointer must come from the typed
+  // (possibly subviewed) view: for subfields of a monolithic group
+  // allocation, the parent's base pointer (get_internal_view_data_unsafe)
+  // does not carry the subview offset.
   template<typename T>
-  nb::dlpack::dtype get_dt_and_set_strides (std::vector<ssize_t>& strides) const
+  nb::dlpack::dtype get_dt_strides_data (std::vector<ssize_t>& strides, void*& data) const
   {
     strides.resize(f.rank());
     switch (f.rank()) {
@@ -101,6 +102,7 @@ private:
       {
         auto v = f.get_view<const T*,Host>();
         strides[0] = v.stride(0);
+        data = const_cast<T*>(v.data());
         break;
       }
       case 2:
@@ -108,6 +110,7 @@ private:
         auto v = f.get_view<const T**,Host>();
         strides[0] = v.stride(0);
         strides[1] = v.stride(1);
+        data = const_cast<T*>(v.data());
         break;
       }
       case 3:
@@ -116,6 +119,7 @@ private:
         strides[0] = v.stride(0);
         strides[1] = v.stride(1);
         strides[2] = v.stride(2);
+        data = const_cast<T*>(v.data());
         break;
       }
       case 4:
@@ -125,6 +129,7 @@ private:
         strides[1] = v.stride(1);
         strides[2] = v.stride(2);
         strides[3] = v.stride(3);
+        data = const_cast<T*>(v.data());
         break;
       }
       case 5:
@@ -135,6 +140,7 @@ private:
         strides[2] = v.stride(2);
         strides[3] = v.stride(3);
         strides[4] = v.stride(4);
+        data = const_cast<T*>(v.data());
         break;
       }
       default:
