@@ -26,17 +26,25 @@ struct PyField {
     f.allocate_view();
   }
 
+  // Wrap a pre-allocated field (e.g. coming from a FieldManager)
+  explicit PyField(const Field& src)
+   : f(src)
+  {
+    // Nothing to do: the field must already be allocated
+    EKAT_REQUIRE_MSG (f.is_allocated(),
+        "Error! Cannot wrap a non-allocated field in PyField.\n"
+        "  - field name: " + f.name() + "\n");
+  }
+
   template <typename FRAMEWORK>
   nb::ndarray<FRAMEWORK> get () const {
     const auto& fh  = f.get_header();
     const auto& fid = fh.get_identifier();
 
-    // Can this actually happen? For now, no, since we only create fields from identifiers, so each PyField
-    // holds separate memory. However, this may change if we allow subfields.
-    EKAT_REQUIRE_MSG (f.get_header().get_parent().lock()==nullptr,
-        "Error! Cannot get the array for a field that is a subfield of another. Please, get array of parent field.\n"
-        "  - field name : " + fid.name() + "\n"
-        "  - parent name: " + fh.get_parent().lock()->get_identifier().name() + "\n");
+    // NOTE: subfields (e.g. tracers inside a monolithic group allocation) are
+    // fine here: the Kokkos subview's data pointer and strides fully describe
+    // the (possibly non-contiguous) slice, and DLPack/nanobind support
+    // arbitrary element strides.
 
     // Get array shape and strides.
     // NOTE: since the field may be padded, the strides do not necessarily
@@ -50,22 +58,25 @@ struct PyField {
     std::vector<ssize_t> strides;
 
     nb::dlpack::dtype dt;
+    void* data = nullptr;
     switch (fid.data_type()) {
       case DataType::IntType:
         dt = get_dt_and_set_strides<int>(strides);
+        data = f.get_internal_view_data_unsafe<int,Host>();
         break;
       case DataType::FloatType:
         dt = get_dt_and_set_strides<float>(strides);
+        data = f.get_internal_view_data_unsafe<float,Host>();
         break;
       case DataType::DoubleType:
         dt = get_dt_and_set_strides<double>(strides);
+        data = f.get_internal_view_data_unsafe<double,Host>();
         break;
       default:
         EKAT_ERROR_MSG ("Unrecognized/unsupported data type.\n");
     }
 
     // NOTE: you MUST set the parent handle, or else you won't have view semantic
-    auto data = f.get_internal_view_data_unsafe<void,Host>();
     auto this_obj = nb::cast(this);
     return nb::ndarray<FRAMEWORK>(data, shape_t, shape, nb::handle(this_obj), strides.data(), dt);
   }
@@ -89,41 +100,41 @@ private:
       case 1:
       {
         auto v = f.get_view<const T*,Host>();
-        strides[0] = v.stride(0)*sizeof(T);
+        strides[0] = v.stride(0);
         break;
       }
       case 2:
       {
         auto v = f.get_view<const T**,Host>();
-        strides[0] = v.stride(0)*sizeof(T);
-        strides[1] = v.stride(1)*sizeof(T);
+        strides[0] = v.stride(0);
+        strides[1] = v.stride(1);
         break;
       }
       case 3:
       {
         auto v = f.get_view<const T***,Host>();
-        strides[0] = v.stride(0)*sizeof(T);
-        strides[1] = v.stride(1)*sizeof(T);
-        strides[2] = v.stride(2)*sizeof(T);
+        strides[0] = v.stride(0);
+        strides[1] = v.stride(1);
+        strides[2] = v.stride(2);
         break;
       }
       case 4:
       {
         auto v = f.get_view<const T****,Host>();
-        strides[0] = v.stride(0)*sizeof(T);
-        strides[1] = v.stride(1)*sizeof(T);
-        strides[2] = v.stride(2)*sizeof(T);
-        strides[3] = v.stride(3)*sizeof(T);
+        strides[0] = v.stride(0);
+        strides[1] = v.stride(1);
+        strides[2] = v.stride(2);
+        strides[3] = v.stride(3);
         break;
       }
       case 5:
       {
         auto v = f.get_view<const T*****,Host>();
-        strides[0] = v.stride(0)*sizeof(T);
-        strides[1] = v.stride(1)*sizeof(T);
-        strides[2] = v.stride(2)*sizeof(T);
-        strides[3] = v.stride(3)*sizeof(T);
-        strides[4] = v.stride(4)*sizeof(T);
+        strides[0] = v.stride(0);
+        strides[1] = v.stride(1);
+        strides[2] = v.stride(2);
+        strides[3] = v.stride(3);
+        strides[4] = v.stride(4);
         break;
       }
       default:

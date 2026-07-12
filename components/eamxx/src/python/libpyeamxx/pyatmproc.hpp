@@ -22,6 +22,7 @@ namespace scream {
 
 struct PyAtmProc {
   std::shared_ptr<AtmosphereProcess> ap;
+  std::shared_ptr<FieldManager> fm;
   std::map<std::string,PyField> fields;
   util::TimeStamp t0;
   util::TimeStamp time;
@@ -58,16 +59,54 @@ struct PyAtmProc {
   }
 
   void create_fields () {
-    // Create  fields that are input/output to the atm proc
-    for (const auto& req : ap->get_required_field_requests()) {
-      const auto& fn = req.fid.name();
-      auto it_bool = fields.emplace(fn,PyField(req.fid,req.pack_size));
-      ap->set_required_field(it_bool.first->second.f.get_const());
+    // Register all field/group requests in a FieldManager and let it
+    // allocate them (this handles field groups and monolithic tracer
+    // allocations, which processes like shoc require). Mirrors
+    // AtmosphereDriver::create_fields; usage is a bitmask
+    // (Updated = Required|Computed).
+    auto gm = PySession::get().gm;
+    fm = std::make_shared<FieldManager>(gm,RepoState::Clean);
+    for (auto req : ap->get_field_requests()) {
+      // Single-process analogue of AtmosphereProcessGroup::
+      // pre_process_tracer_requests: tracers with no explicit advection
+      // preference default to turbulence advection. Without this, groups
+      // like shoc's turbulence_advected_tracers would be empty.
+      if (ekat::contains(req.groups, "tracers") and
+          not ekat::contains(req.groups, "turbulence_advected_tracers") and
+          not ekat::contains(req.groups, "non_turbulence_advected_tracers")) {
+        req.groups.push_back("turbulence_advected_tracers");
+      }
+      fm->register_field(req);
     }
-    for (const auto& req : ap->get_computed_field_requests()) {
-      const auto& fn = req.fid.name();
-      auto it_bool = fields.emplace(fn,PyField(req.fid,req.pack_size));
-      ap->set_computed_field(it_bool.first->second.f);
+    for (const auto& greq : ap->get_group_requests()) {
+      fm->register_group(greq);
+    }
+    fm->registration_ends();
+
+    for (const auto& req : ap->get_field_requests()) {
+      auto f = fm->get_field(req.fid);
+      fields.emplace(req.fid.name(),PyField(f));
+      if (req.usage & Required) {
+        ap->set_required_field(f.get_const());
+      }
+      if (req.usage & Computed) {
+        ap->set_computed_field(f);
+      }
+    }
+    for (const auto& req : ap->get_group_requests()) {
+      auto group = fm->get_field_group(req.name, req.grid);
+      if (req.usage & Required) {
+        ap->set_required_group(group.get_const());
+      }
+      if (req.usage & Computed) {
+        ap->set_computed_group(group);
+      }
+    }
+
+    // Internal fields (gather_internal_fields is a process-group method;
+    // single processes expose theirs directly)
+    for (const auto& f : ap->get_internal_fields()) {
+      fm->add_field(f);
     }
   }
 
@@ -168,21 +207,13 @@ struct PyAtmProc {
     // Load output params
     auto params = ekat::parse_yaml_file(yaml_file);
 
-    // Stuff all fields in a field manager
+    // The field manager built in create_fields already stores all fields
     auto gm = PySession::get().gm;
-    std::map<std::string,std::shared_ptr<FieldManager>> fms;
-    for (auto it : gm->get_repo()) {
-      fms[it.first] = std::make_shared<FieldManager>(it.second,RepoState::Closed);
-    }
-    for (auto it : fields) {
-      const auto& gn = it.second.f.get_header().get_identifier().get_grid_name();
-      fms.at(gn)->add_field(it.second.f);
-    }
 
     // Create/setup the output mgr
     output_mgr = std::make_shared<OutputManager>();
     output_mgr->initialize(comm, params, t0, false);
-    output_mgr->setup(fms,gm);
+    output_mgr->setup(fm,gm->get_grid_names());
     output_mgr->set_logger(ap->get_logger());
   }
 

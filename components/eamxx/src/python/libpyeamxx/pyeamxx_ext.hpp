@@ -2,7 +2,7 @@
 #define PYSCREAM_HPP
 
 #include "physics/register_physics.hpp"
-#include "diagnostics/register_diagnostics.hpp"
+#include "share/diagnostics/register_diagnostics.hpp"
 #include "dynamics/register_dynamics.hpp"
 
 #include "share/data_managers/grids_manager.hpp"

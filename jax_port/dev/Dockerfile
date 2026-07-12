@@ -73,7 +73,8 @@ ENV PIP_BREAK_SYSTEM_PACKAGES=1
 # jax_port/TEST_HARNESS_DESIGN.md).
 RUN python3 -m pip install --no-cache-dir \
         psutil pyyaml netCDF4 packaging \
-        "pybind11[global]" jax pytest
+        "pybind11[global]" jax pytest \
+        nanobind mpi4py
 
 # OpenMPI quality-of-life inside containers: ctest launches mpiexec as root,
 # and the CMA/vader single-copy path needs ptrace caps Docker doesn't grant.

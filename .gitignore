@@ -65,3 +65,4 @@ components/eamxx/src/python/dist
 components/emulators/build
 **/Testing/**
 **/.cache/**
+io_perf_summary_*

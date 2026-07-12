@@ -86,4 +86,8 @@ Container stopped/rebooted host: `docker start scream-dev`.
   `ctest -R cld_fraction` — the `cldfrac_standalone_cpp_vs_jax` test
   compares the JAX adapter against the C++ implementation.
   For the pyeamxx driver (Bridge B) additionally configure
-  `EAMXX_ENABLE_PYSCREAM=ON` (needs `pip install nanobind mpi4py`).
+  `-c EAMXX_ENABLE_PYSCREAM=ON -c CMAKE_POSITION_INDEPENDENT_CODE=ON`
+  (nanobind/mpi4py are in the image). The PIC flag is required because
+  `pyeamxx_ext` is a shared module linking the otherwise non-PIC static
+  archives — on aarch64 the link hard-fails without it. Changing it triggers
+  a large recompile; `make pyeamxx_ext` builds just the needed closure.

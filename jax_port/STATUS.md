@@ -55,4 +55,14 @@ source files changed upstream before trusting them.
 | Docker build/test environment (`jax_port/dev/`) | **verified**: configure + full build + ctest, C++ and Python paths |
 | EAMxx Python swap path (`EAMXX_ENABLE_PYTHON` + adapter) | **verified** via `cldfrac_standalone_cpp_vs_jax` (BFB) |
 | cld_fraction JAX swap test (`eamxx/tests/single-process/cld_fraction`) | added on this branch, passing |
-| Tier-0 pytest scaffolding (`jax_port/tests/`) | 35 property/cross-check tests passing; golden-data generators not yet written |
+| pyeamxx driver (`EAMXX_ENABLE_PYSCREAM`) | **repaired & verified** on this branch (see below) and used for golden data |
+| Golden data (`jax_port/golden/*.npz`, via `harness/gen_golden.py`) | **p3 and shoc captured**: 218 cols x 72 lev, dt=1800, 5 steps, all fields, per-step snapshots; validated NaN-free with plausible evolution |
+| Tier-0 pytest scaffolding (`jax_port/tests/`) | 35 property/cross-check tests passing |
+
+**pyeamxx repairs on this branch (candidates for upstreaming):** stale include
+path; `FieldRequest`/`OutputManager`/`FieldHeader` API drift; **nanobind
+stride-units bug** (strides passed in bytes where DLPack requires elements —
+corrupted memory on any in-place write through `Field.get()`); field/group
+creation now routed through a real `FieldManager` so processes with
+(monolithic) group requests work (shoc); single-process tracer-group
+defaulting mirroring `pre_process_tracer_requests`.
