@@ -20,7 +20,7 @@ from . import orbital
 from . import interface as ifc
 from .orbital import GAS_MOL_WEIGHTS, MWDRY
 
-STEBOL = 5.67e-8
+STEBOL = 5.670374419e-8  # scream::physics::Constants stebol
 GAS_NAMES = ["h2o", "co2", "o3", "n2o", "co", "ch4", "o2", "n2"]
 
 DEFAULT_PARAMS = {

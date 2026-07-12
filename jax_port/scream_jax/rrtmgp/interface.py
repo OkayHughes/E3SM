@@ -21,8 +21,10 @@ from . import cloud_optics as co
 from . import mcica
 from . import rte
 
-GRAVIT = 9.80665
-CPAIR = 1004.64  # scream::physics::Constants Cpair
+# scream::physics::Constants (NOT the RRTMGP-internal 9.80665 used for
+# col_dry inside gas optics — the interface helpers use SCREAM's gravit)
+GRAVIT = 9.80616
+CPAIR = 1004.64
 
 
 def compute_band_by_band_surface_albedos(band_lims_wvn, alb_dir_vis,
