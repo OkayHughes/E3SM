@@ -88,6 +88,17 @@ the Tier-1 golden replay. The C++ enablement branch swaps the ENTIRE step
 extra_shoc_diags/apply_tms/check_flux_state_consistency configs.
 Whole-scheme validation target: `jax_port/golden/shoc_218x72_dt1800_5steps.npz`.
 
+## p3/ (in progress)
+
+| File | Source file(s) | Source @ | Translator | State |
+|---|---|---|---|---|
+| `scream_jax/p3/tables.py` | `impl/p3_init_impl.hpp` (ice table text parser, rain-table numerical integration, dnu) | d957a16d34 | Claude (Fable 5) | **kernel-golden** (computed rain tables match the C++ .dat8 binaries to 1e-14) |
+
+Next for P3 (bottom-up): table interpolation kernels (table3/table_ice),
+DSD parameters, the ~25 process-rate kernels, part1/2/3, sedimentation
+(upwind + adaptive substepping), p3_main, process pre/post, golden replay
+(`golden/p3_218x72_dt1800_5steps.npz`), swap test.
+
 ## Pending (next in port order — see PORTING_PLAN.md §5)
 
 ## Infrastructure
