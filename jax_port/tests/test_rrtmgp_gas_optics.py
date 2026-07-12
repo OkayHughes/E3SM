@@ -96,3 +96,33 @@ def test_gas_optics_lw(kdists):
     # col_gas: dry air column ~ 2.1e25 molec/cm2 total
     total_col_dry = np.asarray(col_gas)[0, :, 0].sum()
     assert 1e25 < total_col_dry < 3e25
+
+
+def test_gas_optics_vs_cpp_golden(kdists):
+    """BFB-level comparison against the real C++ GasOpticsRRTMGPK run on
+    identical inputs (golden/rrtmgp_gasopt_cpp_8x72.npz, generated with
+    harness/cpp_dumpers/gasopt_dump.cpp in the dev container)."""
+    kd_sw, kd_lw = kdists
+    g = REPO / "jax_port" / "golden" / "rrtmgp_gasopt_cpp_8x72.npz"
+    if not g.exists():
+        pytest.skip("gas optics C++ golden archive not available")
+    z = np.load(g)
+    tlay_lim = np.clip(z["tlay"], kd_sw["temp_ref_min"], kd_sw["temp_ref_max"])
+    tlev_lim = np.clip(z["tlev"], kd_lw["temp_ref_min"], kd_lw["temp_ref_max"])
+
+    optics, toa, _ = go.gas_optics_sw(kd_sw, z["play"], z["plev"], tlay_lim,
+                                      z["vmr"])
+    optics_lw, src, _ = go.gas_optics_lw(kd_lw, z["play"], z["plev"],
+                                         tlay_lim, z["tsfc"], z["vmr"],
+                                         tlev=tlev_lim)
+    for mine, name in ((optics["tau"], "sw_tau"), (optics["ssa"], "sw_ssa"),
+                       (optics["g"], "sw_g"), (toa, "sw_toa"),
+                       (optics_lw["tau"], "lw_tau"),
+                       (src["lay_src"], "lw_lay_src"),
+                       (src["lev_src_inc"], "lw_lev_src_inc"),
+                       (src["lev_src_dec"], "lw_lev_src_dec"),
+                       (src["sfc_src"], "lw_sfc_src")):
+        ref = z[name]
+        scale = max(np.abs(ref).max(), 1e-300)
+        err = np.abs(np.asarray(mine) - ref).max() / scale
+        assert err < 1e-14, f"{name}: {err:.3e}"
