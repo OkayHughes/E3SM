@@ -152,7 +152,21 @@ Notes:
 
 P3 is complete through Tier-2.
 
-## rrtmgp/ (in progress)
+> **RRTMGP TIER-2 SWAP-TESTED (2026-07-12):** `rrtmgp_standalone_cpp_vs_jax`
+> passes in-container: the whole radiation step swapped for scream_jax via
+> the embedded-Python bridge over the standalone multi-step run
+> (rad_frequency 3, so both update and no-update steps are exercised),
+> within 1e-8 field-scale error at >99.9% of points. All 11 rrtmgp
+> standalone tests pass (incl. the chunked/not_chunked BFB family), and
+> all four swap tests (cld_fraction, shoc, p3, rrtmgp) pass together.
+>
+> **RRTMGP TIER-1 VALIDATED (2026-07-12):** 3-step golden replay matches
+> every computed field to <=2.6e-11 field-scale error (most bit-exact,
+> MCICA masks identical, zero knife-edge outliers). Two constant
+> mismatches found via replay: SCREAM gravit (9.80616) vs RRTMGP-internal
+> grav (9.80665), and stebol 5.670374419e-8.
+
+## rrtmgp/ (complete through Tier-2)
 
 All C++ comparisons below are against the REAL C++/Kokkos RTE+RRTMGP
 compiled in the dev container, on identical inputs, via the dumpers in
@@ -168,10 +182,10 @@ compiled in the dev container, on identical inputs, via the dumpers in
 | `scream_jax/rrtmgp/rte.py` | cpp/rte/kernels/mo_rte_solver_kernels.h (SW 2-stream+adding, LW noscat), mo_rte_sw/lw.h drivers | d957a16d34 | Claude (Fable 5) | **kernel-golden** (SW <=4e-13, LW <=2e-15 vs C++) |
 | `scream_jax/rrtmgp/interface.py` | eamxx_rrtmgp_interface.hpp (rrtmgp_sw/lw/main + helpers; day-mask instead of day-subset) | d957a16d34 | Claude (Fable 5) | **kernel-golden** (golden/rrtmgp_main_cpp_8x72.npz) |
 | `scream_jax/rrtmgp/orbital.py` | share/util/shr_orb_mod.F90 (Berger series, decl, cosz/avg_cosz) + eamxx_trcmix.cpp | d957a16d34 | Claude (Fable 5) | **kernel-golden** (~1e-15 vs Fortran in-container) |
-| `scream_jax/rrtmgp/process.py` | eamxx_rrtmgp_process_interface.cpp run_impl | d957a16d34 | Claude (Fable 5) | draft (Tier-1 replay next) |
+| `scream_jax/rrtmgp/process.py` | eamxx_rrtmgp_process_interface.cpp run_impl | d957a16d34 | Claude (Fable 5) | **swap-tested** (`rrtmgp_standalone_cpp_vs_jax`) |
+| `scream_jax/adapters/eamxx/rrtmgp_jax.py` | py_module_call in eamxx_rrtmgp_process_interface.cpp (this branch) | d957a16d34 | Claude (Fable 5) | **swap-tested** |
 
-Next for RRTMGP: pyeamxx golden capture -> Tier-1 replay -> Tier-2 swap
-test. Then SPA, then pySEs assembly.
+RRTMGP is complete through Tier-2. Next: SPA, then pySEs assembly.
 
 ## Pending (next in port order — see PORTING_PLAN.md §5)
 

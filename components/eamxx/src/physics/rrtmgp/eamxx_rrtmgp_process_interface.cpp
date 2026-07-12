@@ -7,6 +7,10 @@
 #include "share/scorpio_interface/eamxx_scorpio_interface.hpp"
 #include "share/algorithm/eamxx_fv_phys_rrtmgp_active_gases_workaround.hpp"
 #include "share/property_checks/field_within_interval_check.hpp"
+#ifdef EAMXX_HAS_PYTHON
+#include "share/atm_process/atmosphere_process_pyhelpers.hpp"
+#include <pybind11/numpy.h>
+#endif
 #include "share/physics/eamxx_common_physics_functions.hpp"
 #include "share/util/eamxx_column_ops.hpp"
 
@@ -533,11 +537,156 @@ void RRTMGPRadiation::initialize_impl(const RunType /* run_type */) {
     auto co_vmr = get_field_out("co_volume_mix_ratio").get_view<Real**>();
     Kokkos::deep_copy(co_vmr, m_params.get<double>("covmr", 1.0e-7));
   }
+
+#ifdef EAMXX_HAS_PYTHON
+  if (has_py_module()) {
+    py_module_call("init",
+        coefficients_file_sw, coefficients_file_lw,
+        cloud_optics_file_sw, cloud_optics_file_lw);
+  }
+#endif
 }
 
 // =========================================================================================
 
 void RRTMGPRadiation::run_impl (const double dt) {
+#ifdef EAMXX_HAS_PYTHON
+  if (has_py_module()) {
+    // Swap the ENTIRE radiation step with the python implementation;
+    // this matches the validation unit of the JAX port (see
+    // jax_port/TEST_HARNESS_DESIGN.md and scream_jax/rrtmgp/process.py).
+    EKAT_REQUIRE_MSG (m_params.get<std::string>("py_backend","host")=="host",
+        "Error! The RRTMGP python bridge only supports the host backend.\n");
+    EKAT_REQUIRE_MSG (not m_do_aerosol_rad and
+                      not has_column_conservation_check(),
+        "Error! The RRTMGP python bridge does not marshal aerosol optics "
+        "or conservation-check fluxes.\n");
+
+    auto ts = start_of_step_ts();
+    const double calday = ts.frac_of_year_in_days() + 1;
+    const int year = ts.get_year();
+    const int nstep = ts.get_num_steps();
+
+    auto lat_h = m_lat.get_view<const Real*,Host>();
+    auto lon_h = m_lon.get_view<const Real*,Host>();
+    pybind11::array_t<Real> py_lat(m_ncol, lat_h.data());
+    pybind11::array_t<Real> py_lon(m_ncol, lon_h.data());
+
+    for (auto n : {"T_mid","rad_heating_pdel","cldfrac_rad",
+                   "cosine_solar_zenith_angle",
+                   "SW_flux_up","SW_flux_dn","SW_flux_dn_dir",
+                   "LW_flux_up","LW_flux_dn",
+                   "SW_clnclrsky_flux_up","SW_clnclrsky_flux_dn","SW_clnclrsky_flux_dn_dir",
+                   "SW_clrsky_flux_up","SW_clrsky_flux_dn","SW_clrsky_flux_dn_dir",
+                   "SW_clnsky_flux_up","SW_clnsky_flux_dn","SW_clnsky_flux_dn_dir",
+                   "LW_clnclrsky_flux_up","LW_clnclrsky_flux_dn",
+                   "LW_clrsky_flux_up","LW_clrsky_flux_dn",
+                   "LW_clnsky_flux_up","LW_clnsky_flux_dn",
+                   "sfc_flux_dir_vis","sfc_flux_dir_nir",
+                   "sfc_flux_dif_vis","sfc_flux_dif_nir",
+                   "sfc_flux_sw_net","sfc_flux_lw_dn",
+                   "cldlow","cldmed","cldhgh","cldtot",
+                   "dtau067","dtau105","sunlit_mask",
+                   "T_mid_at_cldtop","p_mid_at_cldtop",
+                   "cldfrac_ice_at_cldtop","cldfrac_liq_at_cldtop",
+                   "cldfrac_tot_at_cldtop","cdnc_at_cldtop",
+                   "eff_radius_qc_at_cldtop","eff_radius_qi_at_cldtop",
+                   "h2o_volume_mix_ratio","co2_volume_mix_ratio",
+                   "n2o_volume_mix_ratio","co_volume_mix_ratio",
+                   "ch4_volume_mix_ratio","o2_volume_mix_ratio",
+                   "n2_volume_mix_ratio"}) {
+      get_field_out(n).sync_to_host();
+    }
+    for (auto n : {"p_mid","p_int","pseudo_density","qv","qc","nc","qi",
+                   "cldfrac_tot","eff_radius_qc","eff_radius_qi",
+                   "sfc_alb_dir_vis","sfc_alb_dir_nir",
+                   "sfc_alb_dif_vis","sfc_alb_dif_nir",
+                   "surf_lw_flux_up","o3_volume_mix_ratio"}) {
+      get_field_in(n).sync_to_host();
+    }
+
+    py_module_call("main",
+        dt, nstep, year, calday,
+        m_rad_freq_in_steps, m_orbital_year,
+        m_orbital_eccen, m_orbital_obliq, m_orbital_mvelp,
+        m_fixed_total_solar_irradiance, m_fixed_solar_zenith_angle,
+        m_co2vmr, m_n2ovmr, m_ch4vmr, m_f11vmr, m_f12vmr,
+        m_n2vmr, m_covmr, m_do_subcol_sampling,
+        m_extra_clnclrsky_diag, m_extra_clnsky_diag,
+        py_lat, py_lon,
+        // inputs
+        get_py_field_host("p_mid"), get_py_field_host("p_int"),
+        get_py_field_host("pseudo_density"),
+        get_py_field_host("sfc_alb_dir_vis"), get_py_field_host("sfc_alb_dir_nir"),
+        get_py_field_host("sfc_alb_dif_vis"), get_py_field_host("sfc_alb_dif_nir"),
+        get_py_field_host("qv"), get_py_field_host("qc"),
+        get_py_field_host("nc"), get_py_field_host("qi"),
+        get_py_field_host("cldfrac_tot"),
+        get_py_field_host("eff_radius_qc"), get_py_field_host("eff_radius_qi"),
+        get_py_field_host("surf_lw_flux_up"),
+        get_py_field_host("o3_volume_mix_ratio"),
+        // updated
+        get_py_field_host("T_mid"), get_py_field_host("rad_heating_pdel"),
+        // computed
+        get_py_field_host("cldfrac_rad"),
+        get_py_field_host("cosine_solar_zenith_angle"),
+        get_py_field_host("SW_flux_up"), get_py_field_host("SW_flux_dn"),
+        get_py_field_host("SW_flux_dn_dir"),
+        get_py_field_host("LW_flux_up"), get_py_field_host("LW_flux_dn"),
+        get_py_field_host("SW_clnclrsky_flux_up"), get_py_field_host("SW_clnclrsky_flux_dn"),
+        get_py_field_host("SW_clnclrsky_flux_dn_dir"),
+        get_py_field_host("SW_clrsky_flux_up"), get_py_field_host("SW_clrsky_flux_dn"),
+        get_py_field_host("SW_clrsky_flux_dn_dir"),
+        get_py_field_host("SW_clnsky_flux_up"), get_py_field_host("SW_clnsky_flux_dn"),
+        get_py_field_host("SW_clnsky_flux_dn_dir"),
+        get_py_field_host("LW_clnclrsky_flux_up"), get_py_field_host("LW_clnclrsky_flux_dn"),
+        get_py_field_host("LW_clrsky_flux_up"), get_py_field_host("LW_clrsky_flux_dn"),
+        get_py_field_host("LW_clnsky_flux_up"), get_py_field_host("LW_clnsky_flux_dn"),
+        get_py_field_host("sfc_flux_dir_vis"), get_py_field_host("sfc_flux_dir_nir"),
+        get_py_field_host("sfc_flux_dif_vis"), get_py_field_host("sfc_flux_dif_nir"),
+        get_py_field_host("sfc_flux_sw_net"), get_py_field_host("sfc_flux_lw_dn"),
+        get_py_field_host("cldlow"), get_py_field_host("cldmed"),
+        get_py_field_host("cldhgh"), get_py_field_host("cldtot"),
+        get_py_field_host("dtau067"), get_py_field_host("dtau105"),
+        get_py_field_host("sunlit_mask"),
+        get_py_field_host("T_mid_at_cldtop"), get_py_field_host("p_mid_at_cldtop"),
+        get_py_field_host("cldfrac_ice_at_cldtop"), get_py_field_host("cldfrac_liq_at_cldtop"),
+        get_py_field_host("cldfrac_tot_at_cldtop"), get_py_field_host("cdnc_at_cldtop"),
+        get_py_field_host("eff_radius_qc_at_cldtop"), get_py_field_host("eff_radius_qi_at_cldtop"),
+        get_py_field_host("h2o_volume_mix_ratio"), get_py_field_host("co2_volume_mix_ratio"),
+        get_py_field_host("n2o_volume_mix_ratio"), get_py_field_host("co_volume_mix_ratio"),
+        get_py_field_host("ch4_volume_mix_ratio"), get_py_field_host("o2_volume_mix_ratio"),
+        get_py_field_host("n2_volume_mix_ratio"));
+
+    for (auto n : {"T_mid","rad_heating_pdel","cldfrac_rad",
+                   "cosine_solar_zenith_angle",
+                   "SW_flux_up","SW_flux_dn","SW_flux_dn_dir",
+                   "LW_flux_up","LW_flux_dn",
+                   "SW_clnclrsky_flux_up","SW_clnclrsky_flux_dn","SW_clnclrsky_flux_dn_dir",
+                   "SW_clrsky_flux_up","SW_clrsky_flux_dn","SW_clrsky_flux_dn_dir",
+                   "SW_clnsky_flux_up","SW_clnsky_flux_dn","SW_clnsky_flux_dn_dir",
+                   "LW_clnclrsky_flux_up","LW_clnclrsky_flux_dn",
+                   "LW_clrsky_flux_up","LW_clrsky_flux_dn",
+                   "LW_clnsky_flux_up","LW_clnsky_flux_dn",
+                   "sfc_flux_dir_vis","sfc_flux_dir_nir",
+                   "sfc_flux_dif_vis","sfc_flux_dif_nir",
+                   "sfc_flux_sw_net","sfc_flux_lw_dn",
+                   "cldlow","cldmed","cldhgh","cldtot",
+                   "dtau067","dtau105","sunlit_mask",
+                   "T_mid_at_cldtop","p_mid_at_cldtop",
+                   "cldfrac_ice_at_cldtop","cldfrac_liq_at_cldtop",
+                   "cldfrac_tot_at_cldtop","cdnc_at_cldtop",
+                   "eff_radius_qc_at_cldtop","eff_radius_qi_at_cldtop",
+                   "h2o_volume_mix_ratio","co2_volume_mix_ratio",
+                   "n2o_volume_mix_ratio","co_volume_mix_ratio",
+                   "ch4_volume_mix_ratio","o2_volume_mix_ratio",
+                   "n2_volume_mix_ratio"}) {
+      get_field_out(n).sync_to_dev();
+    }
+    return;
+  }
+#endif
+
   using PF = scream::PhysicsFunctions<DefaultDevice>;
   using PC = scream::physics::Constants<Real>;
   using CO = scream::ColumnOps<DefaultDevice,Real>;

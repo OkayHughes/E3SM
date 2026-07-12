@@ -14,6 +14,9 @@ eamxx:
   atm_procs_list: [rrtmgp]
   rrtmgp:
     column_chunk_size: ${COL_CHUNK_SIZE}
+    py_module_name: ${PY_MODULE_NAME}
+    py_module_path: ${PY_MODULE_PATH}
+    py_backend: ${PY_BACKEND}
     active_gases: ["h2o", "co2", "o3", "n2o", "co" , "ch4", "o2", "n2"]
     orbital_year: 1990
     Can Initialize All Inputs: true
