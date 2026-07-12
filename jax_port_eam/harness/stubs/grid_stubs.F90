@@ -28,3 +28,15 @@ module cam_control_mod
   public
   integer :: nlvdry = 3
 end module cam_control_mod
+
+module dycore
+  implicit none
+contains
+  logical function dycore_is(name)
+    character(len=*), intent(in) :: name
+    ! E3SM uses the SE dycore; 'LR' (finite volume) is false. The
+    ! geopotential harness exercises only this (non-FV) branch, matching
+    ! all E3SM production configurations.
+    dycore_is = .false.
+  end function dycore_is
+end module dycore
