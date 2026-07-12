@@ -72,6 +72,54 @@ PROC_CONFIGS = {
             "phis": 0.0,  # no topography file in this harness; recorded in metadata
         },
     },
+    "physics_suite": {
+        # the physics-only coupled configuration
+        # (tests/multi-process/physics_only/shoc_cld_spa_p3_rrtmgp)
+        "params": {
+            "type": "group",
+            "atm_procs_list": ["mac_mic", "rrtmgp"],
+            "schedule_type": "sequential",
+            "mac_mic": {
+                "type": "group",
+                "atm_procs_list": ["shoc", "cld_fraction", "spa", "p3"],
+                "schedule_type": "sequential",
+                "number_of_subcycles": 6,
+                "shoc": {
+                    "lambda_low": 0.001, "lambda_high": 0.08,
+                    "lambda_slope": 2.65, "lambda_thresh": 0.02,
+                    "thl2tune": 1.0, "qw2tune": 1.0, "qwthl2tune": 1.0,
+                    "w2tune": 1.0, "length_fac": 0.5,
+                    "c_diag_3rd_mom": 7.0, "coeff_kh": 0.1,
+                    "coeff_km": 0.1, "shoc_1p5tke": False,
+                },
+                "spa": {
+                    "spa_data_file":
+                        "/work/e3sm-inputdata/atm/scream/init/spa_file_unified_and_complete_ne2np4L72_20231222.nc",
+                },
+                "p3": {"max_total_ni": 740.0e3},
+            },
+            "rrtmgp": {
+                "active_gases": ["h2o", "co2", "o3", "n2o", "co", "ch4",
+                                 "o2", "n2"],
+                "orbital_year": 1990,
+                "rrtmgp_coefficients_file_sw":
+                    "/work/e3sm-inputdata/atm/scream/init/rrtmgp-data-sw-g112-210809.nc",
+                "rrtmgp_coefficients_file_lw":
+                    "/work/e3sm-inputdata/atm/scream/init/rrtmgp-data-lw-g128-210809.nc",
+                "rrtmgp_cloud_optics_file_sw":
+                    "/work/e3sm-inputdata/atm/scream/init/rrtmgp-cloud-optics-coeffs-sw.nc",
+                "rrtmgp_cloud_optics_file_lw":
+                    "/work/e3sm-inputdata/atm/scream/init/rrtmgp-cloud-optics-coeffs-lw.nc",
+            },
+        },
+        "ic_fill": {
+            "surf_evap": 0.0,
+            "surf_sens_flux": 0.0,
+            "precip_liq_surf_mass": 0.0,
+            "precip_ice_surf_mass": 0.0,
+            "phis": 0.0,
+        },
+    },
     "spa": {
         "params": {
             "spa_data_file":
@@ -117,6 +165,9 @@ def main():
     ap.add_argument("--steps", type=int, default=5)
     ap.add_argument("--subcycles", type=int, default=None,
                     help="override number_of_subcycles in the process params")
+    ap.add_argument("--perturb", type=float, default=None,
+                    help="multiply T_mid IC by (1 + perturb*noise) to measure "
+                         "inherent divergence growth")
     ap.add_argument("--dt", type=int, default=DT)
     ap.add_argument("-o", "--output", required=True)
     ap.add_argument("--build-dir", default=BUILD_DIR)
@@ -147,7 +198,13 @@ def main():
 def run(args, pyeamxx):
     cfg = PROC_CONFIGS[args.process]
     if args.subcycles is not None:
-        cfg = dict(cfg, params=dict(cfg["params"], number_of_subcycles=args.subcycles))
+        if "mac_mic" in cfg["params"]:
+            mm = dict(cfg["params"]["mac_mic"],
+                      number_of_subcycles=args.subcycles)
+            cfg = dict(cfg, params=dict(cfg["params"], mac_mic=mm))
+        else:
+            cfg = dict(cfg, params=dict(cfg["params"],
+                                        number_of_subcycles=args.subcycles))
 
     pyeamxx.create_grids_manager(NCOLS, NLEVS, args.ic_file)
     proc = pyeamxx.AtmProc(dict(cfg["params"]), args.process)
@@ -166,6 +223,14 @@ def run(args, pyeamxx):
             zero_filled.append(name)
     if zero_filled:
         print(f"WARNING: zero-filled fields missing from IC file: {zero_filled}")
+
+    if args.perturb is not None:
+        rng = np.random.default_rng(12345)
+        f = proc.get_field("T_mid")
+        arr = f.get()
+        arr[...] = arr * (1.0 + args.perturb * rng.uniform(-1, 1, arr.shape))
+        f.sync_to_dev()
+        print(f"perturbed T_mid by {args.perturb}")
 
     proc.initialize(T0)
 

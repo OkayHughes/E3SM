@@ -2,6 +2,7 @@
 #define PYATMPROC_HPP
 
 #include "share/atm_process/atmosphere_process.hpp"
+#include "share/atm_process/atmosphere_process_group.hpp"
 #include "share/io/scorpio_input.hpp"
 #include "share/io/eamxx_output_manager.hpp"
 
@@ -39,6 +40,10 @@ struct PyAtmProc {
 
     // Create the atm proc
     auto& apf = AtmosphereProcessFactory::instance();
+    // "group" normally self-registers inside the APG ctor (groups are an
+    // AD impl detail), so register it here to allow creating a process
+    // group (e.g. a full physics suite) directly from python
+    apf.register_product("group",&create_atmosphere_process<AtmosphereProcessGroup>);
     const auto& ap_type = params.pl.isParameter("type")
                         ? params.pl.get<std::string>("type")
                         : params.pl.name();
