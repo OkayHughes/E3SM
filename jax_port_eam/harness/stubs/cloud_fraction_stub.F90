@@ -13,7 +13,7 @@ module cloud_fraction
   private
   save
 
-  public :: cldfrc_getparams, cldfrc_stub_set
+  public :: cldfrc_getparams, cldfrc_stub_set, cldfrc_fice
 
   real(r8) :: rhminl          = 0.0_r8
   real(r8) :: rhminl_adj_land = 0.0_r8
@@ -65,5 +65,21 @@ contains
     if (present(icecrit_out))         icecrit_out         = icecrit
     if (present(minice_out))          minice_out          = minice
   end subroutine cldfrc_getparams
+
+  ! Abort-only placeholder: cldfrc_fice is real physics (the T-based
+  ! ice/snow partition used only by zm_conv_evap). zm_conv.F90 needs
+  ! the symbol to compile, but the ZM harness driver never calls
+  ! zm_conv_evap, so this must never execute (METHODOLOGY.md: stubs
+  ! never *supply* physics; this one only refuses to).
+  subroutine cldfrc_fice(ncol, t, fice, fsnow)
+    use cam_abortutils, only: endrun
+    integer, intent(in) :: ncol
+    real(r8), intent(in) :: t(ncol, *)
+    real(r8), intent(out) :: fice(ncol, *)
+    real(r8), intent(out) :: fsnow(ncol, *)
+    fice(1:ncol, 1) = 0.0_r8
+    fsnow(1:ncol, 1) = 0.0_r8
+    call endrun('cldfrc_fice stub called: real physics not available')
+  end subroutine cldfrc_fice
 
 end module cloud_fraction
