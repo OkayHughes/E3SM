@@ -17,7 +17,7 @@ Order below is feasibility x impact. "Lines" = Fortran source lines.
 | 3 | ZM deep convection core | cam/zm/zm_conv.F90, zm_conv_cape.F90, zm_conv_util.F90, zm_conv_types.F90 | 3400 | dilute CAPE core (compute_dilute_cape = find_mse_max + compute_dilute_parcel + compute_cape_from_parcel, with zm_conv_util entropy/ientropy/qsat_hPa) **ported + kernel-golden** (eam_jax/zm_cape.py); rest of zm_conv.F90 (updraft/downdraft plumes, closure, tendencies) pending |
 | 4 | ZM transport + intr layer | cam/zm/zm_transport.F90, zm_conv_intr.F90 | 1600 | pending |
 | 5 | Gravity-wave drag | cam/gw/{gw_common,gw_oro,gw_convect,gw_front,gw_diffusion,gw_utils}.F90 | 2200 | orographic spine (gw_prof + gw_oro_src + gw_drag_prof ngwv=0) **ported + kernel-golden** (eam_jax/gw.py); spectrum branch (project_tau, LU diffusion, convect/front sources) pending |
-| 6 | Cloud fraction | cam/cldfrc2m.F90 | 1100 | pending |
+| 6 | Cloud fraction | cam/cldfrc2m.F90 | 1100 | **ported + kernel-golden** (eam_jax/cldfrc2m.py): astG_PDF/astG_RHU (single+vector bodies are identical, ported once) and aist for all iceopt 1-7 (EAMv3 default 5); rhmini/rhmaxi injected per call (readnl is masterproc-only), other params via cloud_fraction stub + real cldfrc2m_init |
 | 7 | Tropopause finder | cam/tropopause.F90 | 1700 | pending |
 | 8 | Convective cloud water | cam/conv_water.F90 | ~500 | pending |
 | 9 | ZM convective microphysics | cam/zm/zm_microphysics.F90 | 3300 | pending (zmconv_microp=.true. in v3 default) |
