@@ -1,5 +1,12 @@
 # JAX Port — Status Ledger
 
+> **SHOC TIER-2 SWAP-TESTED (2026-07-12):** `shoc_standalone_cpp_vs_jax`
+> passes in-container: the whole SHOC step swapped for scream_jax via the
+> embedded-Python bridge, matching the C++ standalone run at <= 2e-5 max
+> relative error with <0.004% of points beyond 1e-6 (fraction-aware
+> comparator, `jax_port/harness/compare_nc_tolerant.py`). All 9 shoc
+> standalone tests and all 5 cld_fraction tests pass.
+>
 > **SHOC TIER-1 VALIDATED (2026-07-12):** The complete SHOC port (all ~57
 > kernels, shoc_main, process pre/post) replays the EAMxx golden archive —
 > 5 host steps x 6 subcycles — with max relative error <= 7e-8 on every
@@ -72,12 +79,13 @@ source files changed upstream before trusting them.
 | `scream_jax/shoc/pblintd.py` | impl/ `shoc_pblintd_init_pot`, `pblintd_height`, `pblintd_surf_temp`, `pblintd_check_pblh`, `shoc_pblintd_cldcheck`, `pblintd` (driver) | d957a16d34 | Claude (Fable 5) | draft |
 | `scream_jax/shoc/main.py` | impl/ `shoc_main` (`shoc_init` + `shoc_main_internal` loop) | d957a16d34 | Claude (Fable 5) | draft (whole-scheme water/energy budget invariants pass) |
 
-| `scream_jax/shoc/process.py` | `eamxx_shoc_process_interface.hpp` (SHOCPreprocess/SHOCPostprocess) + run_impl setup | d957a16d34 | Claude (Fable 5) | **kernel-golden** |
+| `scream_jax/shoc/process.py` | `eamxx_shoc_process_interface.hpp` (SHOCPreprocess/SHOCPostprocess) + run_impl setup | d957a16d34 | Claude (Fable 5) | **swap-tested** |
+| `scream_jax/adapters/eamxx/shoc_jax.py` | py_module_call marshalling in `eamxx_shoc_process_interface.cpp` (this branch) | d957a16d34 | Claude (Fable 5) | **swap-tested** |
 
-The whole SHOC package is **kernel-golden**: `test_shoc_golden.py` replays
-`golden/shoc_218x72_dt1800_5steps.npz` end-to-end (see banner above). Next
-for SHOC: the Tier-2 in-situ swap test (adapter + input_jax.yaml + a
-`has_py_module` branch in the C++ interface).
+The whole SHOC package is **swap-tested** (Tier-2, see banner) on top of
+the Tier-1 golden replay. The C++ enablement branch swaps the ENTIRE step
+(pre+main+post), matching the validated unit; it rejects the unsupported
+extra_shoc_diags/apply_tms/check_flux_state_consistency configs.
 Whole-scheme validation target: `jax_port/golden/shoc_218x72_dt1800_5steps.npz`.
 
 ## Pending (next in port order — see PORTING_PLAN.md §5)

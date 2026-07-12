@@ -24,6 +24,7 @@ math (EXPR NUM_SUBCYCLES "(${ATM_TIME_STEP} + ${SHOC_MAX_DT} - 1) / ${SHOC_MAX_D
 GetInputFile(scream/init/${EAMxx_tests_IC_FILE_72lev})
 GetInputFile(cam/topo/${EAMxx_tests_TOPO_FILE})
 
+set (POSTFIX "")
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/input.yaml
                ${CMAKE_CURRENT_BINARY_DIR}/input.yaml)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/output.yaml
@@ -116,3 +117,43 @@ add_test (NAME check_U_V_slices_fail_missing
 set_tests_properties (check_U_V_slices_fail_missing PROPERTIES
           WILL_FAIL TRUE
           FIXTURES_REQUIRED ${FIXTURES_BASE_NAME}_np${TEST_RANK_START}_omp1)
+
+if (EAMXX_ENABLE_PYTHON)
+  #####################################
+  #            SHOC (JAX)             #
+  #####################################
+  # Swap the whole SHOC step for the scream_jax implementation (see
+  # jax_port/TEST_HARNESS_DESIGN.md) and compare against the C++ run.
+  # Requires `jax` importable by the embedded interpreter.
+
+  set (POSTFIX _jax)
+  set (PY_MODULE_NAME "shoc_jax")
+  set (PY_MODULE_PATH ${SCREAM_BASE_DIR}/../../jax_port/scream_jax/adapters/eamxx)
+  set (PY_BACKEND "host")
+  configure_file(${CMAKE_CURRENT_SOURCE_DIR}/input.yaml
+                 ${CMAKE_CURRENT_BINARY_DIR}/input_jax.yaml)
+  configure_file(${CMAKE_CURRENT_SOURCE_DIR}/output.yaml
+                 ${CMAKE_CURRENT_BINARY_DIR}/output_jax.yaml)
+
+  CreateUnitTestFromExec(${TEST_BASE_NAME}_jax ${TEST_BASE_NAME}
+    EXE_ARGS "--args -ifile=input_jax.yaml"
+    LABELS shoc physics
+    FIXTURES_SETUP shoc_jax)
+
+  # Compare against the C++ (np1) run. Tolerance-based (the JAX port is not
+  # BFB); inv_qc_relvar is excluded: it branches on shoc_ql2 != 0 exactly,
+  # which flips on knife-edge points (see jax_port tests/test_shoc_golden.py).
+  set (SRC_FILE "${TEST_BASE_NAME}_output.INSTANT.nsteps_x1.np1.${RUN_T0}.nc")
+  set (TGT_FILE "${TEST_BASE_NAME}_jax_output.INSTANT.nsteps_x1.np1.${RUN_T0}.nc")
+  # Fraction-aware comparison (TEST_HARNESS_DESIGN.md 7.2): >=99.9% of points
+  # within 1e-6 of the C++, isolated knife-edge branch flips bounded by 1e-2.
+  add_test (NAME ${TEST_BASE_NAME}_cpp_vs_jax
+            COMMAND ${Python_EXECUTABLE} ${SCREAM_BASE_DIR}/../../jax_port/harness/compare_nc_tolerant.py
+            -s ${SRC_FILE} -t ${TGT_FILE} --tol 1e-6 --hard-tol 1e-2 --max-frac 1e-3
+            -v T_mid qv qc tke horiz_winds cldfrac_liq sgs_buoy_flux
+               eddy_diff_mom pbl_height
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+  set_tests_properties(${TEST_BASE_NAME}_cpp_vs_jax PROPERTIES
+        LABELS "shoc;infrastructure"
+        FIXTURES_REQUIRED "shoc_jax;${FIXTURES_BASE_NAME}_np1_omp1")
+endif()

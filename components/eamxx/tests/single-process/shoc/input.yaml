@@ -12,6 +12,9 @@ eamxx:
   atm_procs_list: [shoc]
   shoc:
     number_of_subcycles: ${NUM_SUBCYCLES}
+    py_module_name: ${PY_MODULE_NAME}
+    py_module_path: ${PY_MODULE_PATH}
+    py_backend: ${PY_BACKEND}
     compute_tendencies:
       - qc
       - qv
@@ -54,5 +57,5 @@ initial_conditions:
 
 # The parameters for I/O control
 scorpio:
-  output_yaml_files: ["output.yaml"]
+  output_yaml_files: ["output${POSTFIX}.yaml"]
 ...

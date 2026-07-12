@@ -7,6 +7,11 @@
 #include <ekat_team_policy_utils.hpp>
 #include <ekat_reduction_utils.hpp>
 
+#ifdef EAMXX_HAS_PYTHON
+#include "share/atm_process/atmosphere_process_pyhelpers.hpp"
+#include <pybind11/numpy.h>
+#endif
+
 namespace scream
 {
 
@@ -484,6 +489,12 @@ void SHOCMacrophysics::initialize_impl (const RunType run_type)
   }
   input.dx = cell_length;
   input.dy = cell_length;
+
+#ifdef EAMXX_HAS_PYTHON
+  if (has_py_module()) {
+    py_module_call("init");
+  }
+#endif
 }
 
 // =========================================================================================
@@ -494,6 +505,75 @@ void SHOCMacrophysics::run_impl (const double dt)
   EKAT_REQUIRE_MSG (dt<=300,
       "Error! SHOC is intended to run with a timestep no longer than 5 minutes.\n"
       "       Please, reduce timestep (perhaps increasing subcycling iterations).\n");
+
+#ifdef EAMXX_HAS_PYTHON
+  if (has_py_module()) {
+    // Swap the ENTIRE SHOC step (pre-process + shoc_main + post-process) with
+    // the python implementation; this matches the validation unit of the JAX
+    // port (see jax_port/TEST_HARNESS_DESIGN.md and scream_jax/shoc/process.py).
+    EKAT_REQUIRE_MSG (m_params.get<std::string>("py_backend","host")=="host",
+        "Error! The SHOC python bridge only supports the host backend.\n");
+    EKAT_REQUIRE_MSG (not m_params.get<bool>("extra_shoc_diags", false) and
+                      not m_params.get<bool>("apply_tms", false) and
+                      not m_params.get<bool>("check_flux_state_consistency", false),
+        "Error! The SHOC python bridge does not marshal the fields of "
+        "extra_shoc_diags/apply_tms/check_flux_state_consistency.\n");
+
+    // Grid cell length (computed in initialize_impl), copied to host
+    auto dx_h = Kokkos::create_mirror_view(input.dx);
+    Kokkos::deep_copy(dx_h, input.dx);
+    pybind11::array_t<Real> py_cell_length(m_num_cols, dx_h.data());
+
+    for (auto n : {"T_mid","qv","qc","tke","horiz_winds","cldfrac_liq",
+                   "sgs_buoy_flux","eddy_diff_mom","surf_evap"}) {
+      get_field_out(n).sync_to_host();
+    }
+    for (auto n : {"p_mid","p_int","pseudo_density","omega","phis",
+                   "surf_sens_flux","surf_mom_flux"}) {
+      get_field_in(n).sync_to_host();
+    }
+
+    py_module_call("main",
+        dt, m_npbl,
+        m_params.get<double>("lambda_low"),
+        m_params.get<double>("lambda_high"),
+        m_params.get<double>("lambda_slope"),
+        m_params.get<double>("lambda_thresh"),
+        m_params.get<double>("thl2tune"),
+        m_params.get<double>("qw2tune"),
+        m_params.get<double>("qwthl2tune"),
+        m_params.get<double>("w2tune"),
+        m_params.get<double>("length_fac"),
+        m_params.get<double>("c_diag_3rd_mom"),
+        m_params.get<double>("coeff_kh"),
+        m_params.get<double>("coeff_km"),
+        m_params.get<bool>("shoc_1p5tke"),
+        py_cell_length,
+        // inputs
+        get_py_field_host("p_mid"), get_py_field_host("p_int"),
+        get_py_field_host("pseudo_density"), get_py_field_host("omega"),
+        get_py_field_host("phis"), get_py_field_host("surf_sens_flux"),
+        get_py_field_host("surf_evap"), get_py_field_host("surf_mom_flux"),
+        // updated
+        get_py_field_host("T_mid"), get_py_field_host("qv"),
+        get_py_field_host("qc"), get_py_field_host("tke"),
+        get_py_field_host("horiz_winds"), get_py_field_host("cldfrac_liq"),
+        get_py_field_host("sgs_buoy_flux"), get_py_field_host("eddy_diff_mom"),
+        // computed
+        get_py_field_host("pbl_height"), get_py_field_host("inv_qc_relvar"),
+        get_py_field_host("eddy_diff_heat"), get_py_field_host("w_variance"),
+        get_py_field_host("cldfrac_liq_prev"), get_py_field_host("ustar"),
+        get_py_field_host("obklen"), get_py_field_host("thl_sec"));
+
+    for (auto n : {"T_mid","qv","qc","tke","horiz_winds","cldfrac_liq",
+                   "sgs_buoy_flux","eddy_diff_mom","surf_evap",
+                   "pbl_height","inv_qc_relvar","eddy_diff_heat","w_variance",
+                   "cldfrac_liq_prev","ustar","obklen","thl_sec"}) {
+      get_field_out(n).sync_to_dev();
+    }
+    return;
+  }
+#endif
 
   const auto nlev_packs  = ekat::npack<Pack>(m_num_levs);
   const auto scan_policy    = TPF::get_thread_range_parallel_scan_team_policy(m_num_cols, nlev_packs);
