@@ -31,6 +31,11 @@ from .length import (
     shoc_length,
 )
 from .second_moments import calc_shoc_vertflux, calc_shoc_varorcovar
+from .solver import (
+    update_prognostics_implicit,
+    vd_shoc_decomp,
+    vd_shoc_solve,
+)
 from .surface import shoc_diag_obklen
 from .thermo import compute_shoc_vapor, compute_shoc_temperature
 from .tke import (
