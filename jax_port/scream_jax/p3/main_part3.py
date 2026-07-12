@@ -51,10 +51,17 @@ def p3_main_part3(max_total_ni, dnu, ice_table_vals,
                   inv_exner, cld_frac_l, cld_frac_r, cld_frac_i,
                   rho, inv_rho, rhofaci,
                   qv, th_atm, qc, nc, qr, nr, qi, ni, qm, bm,
-                  vap_liq_exchange, ze_rain, ze_ice, opts):
+                  vap_liq_exchange, ze_rain, ze_ice, opts,
+                  diag_eff_radius_qc_in=None, diag_eff_radius_qr_in=None,
+                  diag_eff_radius_qi_in=None):
     """Returns a dict with the updated state and diagnostics
     (diag_eff_radius_qc/qr/qi, diag_vm_qi, diag_diam_qi, rho_qi,
-    diag_equiv_reflectivity, mu_c, lamc, mu_r, lamr, updated ze arrays)."""
+    diag_equiv_reflectivity, mu_c, lamc, mu_r, lamr, updated ze arrays).
+
+    The eff-radius arrays are masked-set over their prior contents (the
+    p3_main_init values 10/25/500 um) — pass those via the *_in args;
+    they default to zero. diag_vm_qi/diag_diam_qi/rho_qi are zero-init
+    in the C++ (zero_init list), so zeros are correct for them."""
     qv, th_atm = jnp.asarray(qv), jnp.asarray(th_atm)
     qc, nc, qr, nr = (jnp.asarray(a) for a in (qc, nc, qr, nr))
     qi, ni, qm, bm = (jnp.asarray(a) for a in (qi, ni, qm, bm))
@@ -66,9 +73,12 @@ def p3_main_part3(max_total_ni, dnu, ice_table_vals,
     ze_rain = jnp.asarray(ze_rain)
     ze_ice = jnp.asarray(ze_ice)
 
-    diag_eff_radius_qc = jnp.zeros_like(qc)
-    diag_eff_radius_qr = jnp.zeros_like(qc)
-    diag_eff_radius_qi = jnp.zeros_like(qc)
+    diag_eff_radius_qc = (jnp.zeros_like(qc) if diag_eff_radius_qc_in is None
+                          else jnp.asarray(diag_eff_radius_qc_in))
+    diag_eff_radius_qr = (jnp.zeros_like(qc) if diag_eff_radius_qr_in is None
+                          else jnp.asarray(diag_eff_radius_qr_in))
+    diag_eff_radius_qi = (jnp.zeros_like(qc) if diag_eff_radius_qi_in is None
+                          else jnp.asarray(diag_eff_radius_qi_in))
     diag_vm_qi = jnp.zeros_like(qc)
     diag_diam_qi = jnp.zeros_like(qc)
     rho_qi = jnp.zeros_like(qc)

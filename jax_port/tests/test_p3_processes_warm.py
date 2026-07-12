@@ -53,18 +53,30 @@ def test_rain_self_collection_breakup_reduces_rate():
 
 
 def test_ice_nucleation_branches():
+    # do_log = (!predict_nc || prescribed): True -> Cooper-type formula,
+    # False (predict_nc alone) -> ni_activated relaxation. (The C++ mask
+    # names `any_if_log`/`any_if_not_log` are inverted relative to do_log.)
     ctx = np.ones(3, dtype=bool)
     cold = np.array([240.0, 240.0, 280.0])
     supersat = np.array([0.1, 0.01, 0.1])
+    # predict_nc=False -> Cooper formula: needs cold + supersaturated,
+    # independent of ni_activated
     q, n = (np.asarray(a) for a in pw.ice_nucleation(
-        cold, np.ones(3), np.zeros(3), np.full(3, 5e4), supersat,
+        cold, np.ones(3), np.zeros(3), np.zeros(3), supersat,
         1.0 / 300.0, False, False, OPTS, ctx))
     assert n[0] > 0 and q[0] > 0
     assert n[1] == 0 and n[2] == 0
+    # predict_nc=True -> relax ni toward ni_activated
     q2, n2 = (np.asarray(a) for a in pw.ice_nucleation(
+        cold, np.ones(3), np.zeros(3), np.full(3, 5e4), supersat,
+        1.0 / 300.0, True, False, OPTS, ctx))
+    np.testing.assert_allclose(n2[0], 5e4 / 300.0, rtol=1e-14)
+    assert q2[0] > 0 and n2[1] == 0 and n2[2] == 0
+    # with nothing to activate, the predict_nc branch nucleates nothing
+    q3, n3 = (np.asarray(a) for a in pw.ice_nucleation(
         cold, np.ones(3), np.zeros(3), np.zeros(3), supersat,
         1.0 / 300.0, True, False, OPTS, ctx))
-    assert n2[0] > 0 and q2[0] > 0 and n2[2] == 0
+    assert np.all(n3 == 0) and np.all(q3 == 0)
 
 
 def test_immersion_freezing_temperature_gate():

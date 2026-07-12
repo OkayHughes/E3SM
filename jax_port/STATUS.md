@@ -1,5 +1,22 @@
 # JAX Port — Status Ledger
 
+> **P3 TIER-1 VALIDATED (2026-07-12):** The complete P3 port (tables,
+> ~30 process kernels, parts 1/2/3, sedimentation, homogeneous freezing,
+> p3_main, process pre/post) replays the EAMxx golden archive (5 steps,
+> dt=1800, 218x72). Warm/thermo fields match at 1e-12..1e-14 field-scale
+> relative error at EVERY point (T_mid 7e-14, qc/qr/nc/nr ~1e-13,
+> exchanges ~1e-12). Ice-path fields carry bounded knife-edge outliers
+> (qi max 6e-4 at 2.4% of points, qm/bm max 1.8e-2): verified NOT a port
+> bug — the real C++ ice_sedimentation fed two part2 states differing
+> only by 1e-13 FP noise reproduces the same divergence (discontinuous
+> rime-density/qsmall branches + exponential cloud-top drainage).
+> Direct C++ cross-validation via p3_test_data host wrappers in-container:
+> my part1/part2/cloud-rain-ice sed/homog freezing/part3 are each
+> **bit-level identical** to the C++ on identical inputs (<= 3e-15,
+> ice sed 5e-21). Two bugs found & fixed this way: inverted
+> ice_nucleation branch (C++ `any_if_not_log` naming trap) and part3
+> eff-radius init values. Run: `pytest jax_port/tests/test_p3_golden.py -s`.
+>
 > **SHOC TIER-2 SWAP-TESTED (2026-07-12):** `shoc_standalone_cpp_vs_jax`
 > passes in-container: the whole SHOC step swapped for scream_jax via the
 > embedded-Python bridge, matching the C++ standalone run at <= 2e-5 max
@@ -99,11 +116,34 @@ Whole-scheme validation target: `jax_port/golden/shoc_218x72_dt1800_5steps.npz`.
 | `scream_jax/p3/processes_ice.py` | impl/ ice_collection (3), ice_melting, ice_cldliq_wet_growth, ice_deposition_sublimation, ice/liq relaxation timescales, evaporate_rain (+3 helpers) | d957a16d34 | Claude (Fable 5) | draft |
 | `scream_jax/p3/conservation.py` | impl/ q/n conservation (6), ice_supersat_conservation, prevent_liq_supersaturation, impose_max_total_ni, incloud_mixingratios | d957a16d34 | Claude (Fable 5) | draft |
 | `scream_jax/p3/cell_average.py` | impl/ back_to_cell_average, get_time_space_phys_variables | d957a16d34 | Claude (Fable 5) | draft |
-| `scream_jax/p3/update.py` | impl/ update_prognostic_ice, update_prognostic_liquid | d957a16d34 | Claude (Fable 5) | draft |
+| `scream_jax/p3/update.py` | impl/ update_prognostic_ice, update_prognostic_liquid | d957a16d34 | Claude (Fable 5) | **kernel-golden** (via part2 C++ cross-validation) |
+| `scream_jax/p3/main_part1.py` | impl/ `p3_main_impl_part1.hpp` | d957a16d34 | Claude (Fable 5) | **kernel-golden** (BFB vs `p3_main_part1_host`) |
+| `scream_jax/p3/main_part2.py` | impl/ `p3_main_impl_part2.hpp` (593-line k-loop) | d957a16d34 | Claude (Fable 5) | **kernel-golden** (<=3e-15 vs `p3_main_part2_host` on identical inputs) |
+| `scream_jax/p3/main_part3.py` | impl/ `p3_main_impl_part3.hpp` + calc_bulk_rho_rime | d957a16d34 | Claude (Fable 5) | **kernel-golden** (BFB vs `p3_main_part3_host`) |
+| `scream_jax/p3/sedimentation.py` | impl/ `p3_find`, `p3_upwind`, `p3_cloud_sed`, `p3_rain_sed`, `p3_ice_sed` (incl. homogeneous_freezing) | d957a16d34 | Claude (Fable 5) | **kernel-golden** (ice sed 5e-21 vs `ice_sedimentation_host`; cloud/rain sed BFB in stage pipeline) |
+| `scream_jax/p3/main.py` | impl/ `p3_main_impl.hpp` (init + orchestration + early exits) | d957a16d34 | Claude (Fable 5) | **kernel-golden** (whole-main vs `p3_main_host`: warm fields <=1e-13, ice knife-edge bounded) |
+| `scream_jax/p3/process.py` | `eamxx_p3_process_interface.hpp/.cpp`, `eamxx_p3_run.cpp` (preamble/postamble, wet<->dry, cld-frac max-overlap) | d957a16d34 | Claude (Fable 5) | **kernel-golden** (Tier-1 golden replay passes) |
 
-Next for P3 (bottom-up): part1/2/3, sedimentation
-(upwind + adaptive substepping), p3_main, process pre/post, golden replay
-(`golden/p3_218x72_dt1800_5steps.npz`), swap test.
+Tier-0/Tier-1 status: `pytest jax_port/tests/` — 119 passing, including
+`test_p3_golden.py` (Tier-1 replay) and `test_p3_main.py` /
+`test_p3_sedimentation.py` (conservation & property tests).
+
+Notes:
+- `p3/process.py` mirrors the C++: p3_main's `pres`/`dpres` are the DRY
+  pressure/thickness; state converts wet->dry before and dry->wet after;
+  dz uses full pseudo_density with still-wet qv; rainfrac gets the
+  max-overlap of cldfrac_tot from the level above.
+- `precip_ice_flux` stays zero — the C++ zero-initializes it and never
+  accumulates it (only the liquid flux is filled, by rain sed).
+- C++ cross-validation dumpers used for the above (`sed_dump`,
+  `part2_dump`, `main_dump`, `stage_dump`) live in the container at
+  `/work/*.cpp`, compiled against `p3_test_infra` — rebuild recipe in the
+  respective compile commands (link line from
+  `CMakeFiles/p3_tests.dir/link.txt`).
+
+Next for P3: Tier-2 swap test (C++ EAMXX_HAS_PYTHON branch in
+`eamxx_p3_process_interface.cpp` + `p3_jax.py` adapter + single-process
+CMake test, mirroring SHOC's).
 
 ## Pending (next in port order — see PORTING_PLAN.md §5)
 

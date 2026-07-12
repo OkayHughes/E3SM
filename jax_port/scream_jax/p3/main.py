@@ -158,7 +158,10 @@ def p3_main(dt,
         g["qv"], sed["th_atm"],
         sed["qc"], sed["nc"], sed["qr"], sed["nr"],
         sed["qi"], sed["ni"], sed["qm"], sed["bm"],
-        diags["vap_liq_exchange"], ze_rain, ze_ice, opts)
+        diags["vap_liq_exchange"], ze_rain, ze_ice, opts,
+        diag_eff_radius_qc_in=jnp.full_like(zcol, 10.0e-6),
+        diag_eff_radius_qr_in=jnp.full_like(zcol, 500.0e-6),
+        diag_eff_radius_qi_in=jnp.full_like(zcol, 25.0e-6))
 
     # second early exit: only run3 columns take the sed/freeze/part3 result
     out_state = {}

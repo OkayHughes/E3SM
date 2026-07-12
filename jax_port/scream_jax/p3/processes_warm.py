@@ -114,20 +114,25 @@ def ice_nucleation(temp, inv_rho, ni, ni_activated, qv_supersat_i, inv_dt,
     mi0 = 4.0 * c.PIOV3 * 900.0 * 1e-18
 
     base = (temp < t_icenuc) & (jnp.asarray(qv_supersat_i) >= 0.05) & context
+    # Trap: the C++ mask named `any_if_not_log` is the one gated on
+    # do_log being TRUE (Cooper-type formula); `any_if_log` is gated on
+    # do_log being FALSE (ni_activated branch).
     do_log = (not do_predict_nc) or do_prescribed_ccn
 
     if do_log:
-        n_nuc = jnp.where(base, jnp.maximum(0.0, (jnp.asarray(ni_activated) - ni) * inv_dt), 0.0)
-        q_nuc = n_nuc * mi0
-        return q_nuc, n_nuc
+        dum = 0.005 * jnp.exp(opts["deposition_nucleation_exponent"]
+                              * (c.Tmelt - temp)) * 1.0e3 * jnp.asarray(inv_rho)
+        dum = jnp.minimum(dum, 1.0e5 * jnp.asarray(inv_rho))
+        n_nuc = jnp.maximum(0.0, (dum - ni) * inv_dt)
+        ok = base & (n_nuc >= c.NSMALL)
+        q_nuc = jnp.maximum(0.0, (dum - ni) * mi0 * inv_dt)
+        return jnp.where(ok, q_nuc, 0.0), jnp.where(ok, n_nuc, 0.0)
 
-    dum = 0.005 * jnp.exp(opts["deposition_nucleation_exponent"]
-                          * (c.Tmelt - temp)) * 1.0e3 * jnp.asarray(inv_rho)
-    dum = jnp.minimum(dum, 1.0e5 * jnp.asarray(inv_rho))
-    n_nuc = jnp.maximum(0.0, (dum - ni) * inv_dt)
-    ok = base & (n_nuc >= c.NSMALL)
-    q_nuc = jnp.maximum(0.0, (dum - ni) * mi0 * inv_dt)
-    return jnp.where(ok, q_nuc, 0.0), jnp.where(ok, n_nuc, 0.0)
+    n_nuc = jnp.where(
+        base,
+        jnp.maximum(0.0, (jnp.asarray(ni_activated) - ni) * inv_dt), 0.0)
+    q_nuc = n_nuc * mi0
+    return q_nuc, n_nuc
 
 
 def ice_classical_nucleation(frzimm, frzcnt, frzdep, rho, qc_incld, nc_incld,
