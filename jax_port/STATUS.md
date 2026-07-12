@@ -150,9 +150,28 @@ Notes:
   respective compile commands (link line from
   `CMakeFiles/p3_tests.dir/link.txt`).
 
-P3 is complete through Tier-2. Next per PORTING_PLAN.md §5: RRTMGP
-radiation (or SPA/nudging depending on priorities) and the pySEs-side
-assembly of the validated shoc/cld_fraction/p3 chain.
+P3 is complete through Tier-2.
+
+## rrtmgp/ (in progress)
+
+All C++ comparisons below are against the REAL C++/Kokkos RTE+RRTMGP
+compiled in the dev container, on identical inputs, via the dumpers in
+`harness/cpp_dumpers/` (gasopt_dump.cpp, rrtmgpmain_dump.cpp).
+
+| File | Source file(s) | Source @ | Translator | State |
+|---|---|---|---|---|
+| `scream_jax/rrtmgp/coefficients.py` | cpp/examples/mo_load_coefficients.h + GasOpticsRRTMGPK::load/init_abs_coeffs (conv::SimpleNetCDF conventions: reversed dims, ints shifted 0-based) | d957a16d34 | Claude (Fable 5) | **kernel-golden** |
+| `scream_jax/rrtmgp/gas_optics.py` | cpp/rrtmgp/kernels/mo_gas_optics_kernels.h (Kokkos), mo_gas_optics_rrtmgp.h (compute_gas_taus/source/get_col_dry) | d957a16d34 | Claude (Fable 5) | **kernel-golden** (<=5.6e-16 vs C++, golden/rrtmgp_gasopt_cpp_8x72.npz) |
+| `scream_jax/rrtmgp/optical_props.py` | cpp/rte/kernels/mo_optical_props_kernels.h (delta scale, increments) | d957a16d34 | Claude (Fable 5) | **kernel-golden** (via rrtmgp_main comparison) |
+| `scream_jax/rrtmgp/cloud_optics.py` | cpp/extensions/cloud_optics/mo_cloud_optics.h (CloudOpticsK LUT path) | d957a16d34 | Claude (Fable 5) | **kernel-golden** (1e-16 vs C++) |
+| `scream_jax/rrtmgp/mcica.py` | rrtmgp_conversion.h conv::Random (JSF64) + eamxx get_subcolumn_mask/get_subsampled_clouds | d957a16d34 | Claude (Fable 5) | **kernel-golden** (RNG bit-exact; subsampled tau identical to C++) |
+| `scream_jax/rrtmgp/rte.py` | cpp/rte/kernels/mo_rte_solver_kernels.h (SW 2-stream+adding, LW noscat), mo_rte_sw/lw.h drivers | d957a16d34 | Claude (Fable 5) | **kernel-golden** (SW <=4e-13, LW <=2e-15 vs C++) |
+| `scream_jax/rrtmgp/interface.py` | eamxx_rrtmgp_interface.hpp (rrtmgp_sw/lw/main + helpers; day-mask instead of day-subset) | d957a16d34 | Claude (Fable 5) | **kernel-golden** (golden/rrtmgp_main_cpp_8x72.npz) |
+| `scream_jax/rrtmgp/orbital.py` | share/util/shr_orb_mod.F90 (Berger series, decl, cosz/avg_cosz) + eamxx_trcmix.cpp | d957a16d34 | Claude (Fable 5) | **kernel-golden** (~1e-15 vs Fortran in-container) |
+| `scream_jax/rrtmgp/process.py` | eamxx_rrtmgp_process_interface.cpp run_impl | d957a16d34 | Claude (Fable 5) | draft (Tier-1 replay next) |
+
+Next for RRTMGP: pyeamxx golden capture -> Tier-1 replay -> Tier-2 swap
+test. Then SPA, then pySEs assembly.
 
 ## Pending (next in port order — see PORTING_PLAN.md §5)
 

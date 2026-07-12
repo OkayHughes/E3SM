@@ -72,6 +72,26 @@ PROC_CONFIGS = {
             "phis": 0.0,  # no topography file in this harness; recorded in metadata
         },
     },
+    "rrtmgp": {
+        "params": {
+            # mirror tests/single-process/rrtmgp/input.yaml, but update
+            # radiation every step for straightforward replay
+            "active_gases": ["h2o", "co2", "o3", "n2o", "co", "ch4",
+                             "o2", "n2"],
+            "orbital_year": 1990,
+            "rad_frequency": 1,
+            "do_aerosol_rad": False,
+            "rrtmgp_coefficients_file_sw":
+                "/work/e3sm-inputdata/atm/scream/init/rrtmgp-data-sw-g112-210809.nc",
+            "rrtmgp_coefficients_file_lw":
+                "/work/e3sm-inputdata/atm/scream/init/rrtmgp-data-lw-g128-210809.nc",
+            "rrtmgp_cloud_optics_file_sw":
+                "/work/e3sm-inputdata/atm/scream/init/rrtmgp-cloud-optics-coeffs-sw.nc",
+            "rrtmgp_cloud_optics_file_lw":
+                "/work/e3sm-inputdata/atm/scream/init/rrtmgp-cloud-optics-coeffs-lw.nc",
+        },
+        "ic_fill": {},
+    },
 }
 
 
