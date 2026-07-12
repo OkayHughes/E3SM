@@ -23,7 +23,22 @@ from .energy import (
 )
 from .grid import shoc_grid, dp_inverse, compute_tmpi
 from .interp import linear_interp
+from .length import (
+    check_length_scale_shoc_length,
+    compute_brunt_shoc_length,
+    compute_l_inf_shoc_length,
+    compute_shoc_mix_shoc_length,
+    shoc_length,
+)
 from .second_moments import calc_shoc_vertflux, calc_shoc_varorcovar
 from .surface import shoc_diag_obklen
 from .thermo import compute_shoc_vapor, compute_shoc_temperature
-from .tke import check_tke
+from .tke import (
+    adv_sgs_tke,
+    check_tke,
+    compute_shr_prod,
+    eddy_diffusivities,
+    integ_column_stability,
+    isotropic_ts,
+    shoc_tke,
+)

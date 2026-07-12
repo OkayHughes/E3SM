@@ -54,13 +54,13 @@ source files changed upstream before trusting them.
 | `scream_jax/shoc/grid.py` | impl/ `shoc_grid`, `shoc_dp_inverse`, `shoc_compute_tmpi` | d957a16d34 | Claude (Fable 5) | draft |
 | `scream_jax/shoc/thermo.py` | impl/ `shoc_compute_shoc_vapor`, `shoc_compute_shoc_temperature` | d957a16d34 | Claude (Fable 5) | draft |
 | `scream_jax/shoc/interp.py` | impl/ `shoc_linear_interp` | d957a16d34 | Claude (Fable 5) | draft |
-| `scream_jax/shoc/tke.py` | impl/ `shoc_check_tke` (rest of TKE chain pending) | d957a16d34 | Claude (Fable 5) | draft |
+| `scream_jax/shoc/tke.py` | impl/ `shoc_check_tke`, `shoc_integ_column_stability`, `shoc_compute_shr_prod`, `shoc_adv_sgs_tke`, `shoc_isotropic_ts`, `shoc_eddy_diffusivities`, `shoc_tke` (driver) | d957a16d34 | Claude (Fable 5) | draft |
+| `scream_jax/shoc/length.py` | impl/ `shoc_compute_brunt_shoc_length`, `shoc_compute_l_inf_shoc_length`, `shoc_compute_shoc_mix_shoc_length`, `shoc_check_length_scale_shoc_length`, `shoc_length` (driver) | d957a16d34 | Claude (Fable 5) | draft |
 | `scream_jax/shoc/energy.py` | impl/ `shoc_energy_integrals`, `shoc_energy_fixer`, `shoc_update_host_dse` | d957a16d34 | Claude (Fable 5) | draft |
 | `scream_jax/shoc/surface.py` | impl/ `shoc_diag_obklen` | d957a16d34 | Claude (Fable 5) | draft |
 | `scream_jax/shoc/second_moments.py` | impl/ `shoc_calc_shoc_vertflux`, `shoc_calc_shoc_varorcovar` (driver chain pending) | d957a16d34 | Claude (Fable 5) | draft |
 
-Remaining SHOC kernels (in port order): length-scale chain, TKE chain,
-implicit diffusion (update_prognostics_implicit + tridiag), second/third
+Remaining SHOC kernels (in port order): implicit diffusion (update_prognostics_implicit + tridiag), second/third
 moment drivers + boundary conditions, assumed-PDF chain (13 kernels),
 pblintd chain (6), `shoc_main` driver, process-interface pre/post.
 Whole-scheme validation target: `jax_port/golden/shoc_218x72_dt1800_5steps.npz`.
