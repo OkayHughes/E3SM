@@ -15,8 +15,23 @@ PORT_NOTES
   The Fortran golden harness runs with the same flag false, so goldens
   and port match. MCSP and zm_aero paths are inactive by construction
   (mcsp lives in zm_conv_intr/zm_conv_mcsp; aero is only touched under
-  zm_microp). zm_conv_evap is a separate routine (intr layer) and is
-  NOT ported here.
+  zm_microp).
+- zm_conv_evap (below-cloud Sundqvist evaporation of convective
+  precip + snow melt/production) IS ported here, together with the
+  real cloud_fraction.F90 cldfrc_fice it calls (T-based ice/snow
+  partition; top_lev effectively 1 -- in production top_lev =
+  trop_cloud_top_lev sits above the 40 hPa limcnv cap where all ZM
+  precip fluxes are identically zero, so the choice cannot affect
+  outputs). Both zm_param%old_snow branches are ported and goldened;
+  with zm_microp=False the not-old_snow branch has prdsnow = 0
+  (microp_st%sprd needs zm_microphysics, PORTING_PLAN.md row 9), so
+  its snow flux is identically zero and its final flxsnow<=flxprec
+  protection loop is unreachable (ported verbatim, validated only for
+  no-op). tend_s/tend_q are declared inout in the Fortran but every
+  (i,k) is overwritten before being read, so the port treats them as
+  pure outputs. zm_param%ke is the single zmconv_ke evaporation
+  efficiency (no zmconv_ke_lnd exists in EAMv3 zm_conv.F90).
+  pergro_active = False (no PERGRO).
 - Index convention: 0-based, level 0 = model top. Fortran midpoint k
   maps to python k-1. msg = limcnv-1 keeps its Fortran VALUE (it is
   the count of excluded top levels; Fortran loops k = msg+1..pver are
@@ -76,10 +91,12 @@ PORT_NOTES
 import numpy as np
 import jax.numpy as jnp
 
+from .wv_sat import qsat as _qsat_pa
 from .zm_cape import compute_dilute_cape, make_zm_const, qsat_hpa
 from .zm_cape import make_zm_param as _make_cape_param
 
-__all__ = ["make_zm_const", "make_zm_param", "zm_conv_main"]
+__all__ = ["make_zm_const", "make_zm_param", "zm_conv_main",
+           "cldfrc_fice", "zm_conv_evap"]
 
 # zm_conv module parameters (zm_conv.F90)
 CAPE_THRESHOLD_OLD = 70.0     # [J/kg] pre-DCAPE trigger threshold
@@ -1047,3 +1064,204 @@ def zm_conv_main(t_mid, q_mid_in, omega, p_mid_in, p_int_in, p_del_in,
                qtnd=qtnd, mcon=mcon, pflx=pflx, zdu=zdu, rliq=rliq,
                rprd=rprd, dlf=dlf)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Precipitation evaporation / snow production (zm_conv_evap)
+# ---------------------------------------------------------------------------
+def cldfrc_fice(t_mid, zc):
+    """cloud_fraction.F90 cldfrc_fice: fraction of condensate in the
+    ice phase and the snow fraction for convection, both piecewise
+    linear in temperature (top_lev = 1: all levels computed; see
+    PORT_NOTES). Returns (fice, fsnow)."""
+    t_mid = jnp.asarray(t_mid, dtype=jnp.float64)
+    tmax_fice = zc["tfreez"] - 10.0
+    tmin_fice = tmax_fice - 30.0
+    tmax_fsnow = zc["tfreez"]
+    tmin_fsnow = zc["tfreez"] - 5.0
+    fice = jnp.where(
+        t_mid > tmax_fice, 0.0,
+        jnp.where(t_mid < tmin_fice, 1.0,
+                  (tmax_fice - t_mid) / (tmax_fice - tmin_fice)))
+    fsnow = jnp.where(
+        t_mid > tmax_fsnow, 0.0,
+        jnp.where(t_mid < tmin_fsnow, 1.0,
+                  (tmax_fsnow - t_mid) / (tmax_fsnow - tmin_fsnow)))
+    return fice, fsnow
+
+
+def zm_conv_evap(p_mid, p_del, t_mid, q_mid, prdprec, cldfrc, prec_in,
+                 time_step, zc, zp, prdsnow=None):
+    """zm_conv.F90 zm_conv_evap: below-cloud Sundqvist-type
+    evaporation of convective precip, snow melt/production with the
+    latent heat of fusion, and the surface precip/snow rates.
+
+    p_mid/p_del [Pa], t_mid [K], q_mid [kg/kg], prdprec [kg/kg/s]
+    (rain production, rprd), cldfrc (cloud fraction), prec_in [m/s]
+    (the intent(inout) prec from zm_conv_main), time_step [s].
+    zp needs ke, old_snow (zm_microp is False in this scope; prdsnow
+    defaults to zero, exactly the .not. zm_microp branch).
+    tend_s/tend_q are pure outputs (see PORT_NOTES). Returns a dict:
+    tend_s, tend_q, tend_s_snwprd, tend_s_snwevmlt [J/kg/s | kg/kg/s],
+    prec, snow [m/s], ntprprd, ntsnprd [kg/kg/s], flxprec, flxsnow
+    [kg/m2/s] (ncol, pver+1)."""
+    p_mid = jnp.asarray(p_mid, dtype=jnp.float64)
+    p_del = jnp.asarray(p_del, dtype=jnp.float64)
+    t_mid = jnp.asarray(t_mid, dtype=jnp.float64)
+    q_mid = jnp.asarray(q_mid, dtype=jnp.float64)
+    prdprec = jnp.asarray(prdprec, dtype=jnp.float64)
+    cldfrc = jnp.asarray(cldfrc, dtype=jnp.float64)
+    ncol, pver = t_mid.shape
+    grav = zc["grav"]
+    latice = zc["latice"]
+    latvap = zc["latvap"]
+    cpair = zc["cpair"]
+    tfreez = zc["tfreez"]
+    old_snow = bool(zp["old_snow"])
+    ke = zp["ke"]
+    pergro_active = False
+
+    if prdsnow is None:
+        prdsnow = jnp.zeros((ncol, pver))   # .not. zm_microp
+    else:
+        prdsnow = jnp.asarray(prdsnow, dtype=jnp.float64)
+
+    # convert input precip to kg/m2/s
+    prec = jnp.asarray(prec_in, dtype=jnp.float64) * 1000.0
+
+    # saturation (mixed-phase table qsat, as wv_saturation's qsat)
+    qs = _qsat_pa(t_mid, p_mid)["qs"]
+
+    # ice/snow fraction in rain production
+    _fice, fsnow_conv = cldfrc_fice(t_mid, zc)
+
+    flxprec = jnp.zeros((ncol, pver + 1))
+    flxsnow = jnp.zeros((ncol, pver + 1))
+    evpvint = jnp.zeros(ncol)
+    tend_s = jnp.zeros((ncol, pver))
+    tend_q = jnp.zeros((ncol, pver))
+    tend_s_snwprd = jnp.zeros((ncol, pver))
+    tend_s_snwevmlt = jnp.zeros((ncol, pver))
+    ntprprd = jnp.zeros((ncol, pver))
+    ntsnprd = jnp.zeros((ncol, pver))
+
+    for k in range(pver):
+        tk = t_mid[:, k]
+        dpk = p_del[:, k]
+        fpk = flxprec[:, k]
+        fsk = flxsnow[:, k]
+        warm = tk > tfreez
+
+        # melt snow falling into the layer
+        if old_snow:
+            flxsntm = jnp.where(warm, 0.0, fsk)
+            snowmlt = jnp.where(warm, fsk * grav / dpk, 0.0)
+        else:
+            # make sure melting snow doesn't cool below the threshold
+            dum0 = -latice / cpair * fsk * grav / dpk * time_step
+            full_melt_too_cold = (tk + dum0) <= tfreez
+            denom = jnp.where(full_melt_too_cold & warm,
+                              fsk * grav / dpk, 1.0)
+            dum_lim = (tk - tfreez) * cpair / latice / time_step / denom
+            dum_lim = jnp.clip(dum_lim, 0.0, 1.0)
+            dum = jnp.where(full_melt_too_cold, dum_lim, 1.0) * OMSM
+            flxsntm = jnp.where(warm, fsk * (1.0 - dum), fsk)
+            snowmlt = jnp.where(warm, dum * fsk * grav / dpk, 0.0)
+
+        # relative humidity depression must be > 0 for evaporation
+        evplimit = jnp.maximum(1.0 - q_mid[:, k] / qs[:, k], 0.0)
+        evpprec = (ke * (1.0 - cldfrc[:, k]) * evplimit
+                   * jnp.sqrt(fpk))
+
+        # don't supersaturate; don't evaporate more than falls in;
+        # don't exceed the remaining input precipitation
+        evplimit = jnp.maximum(0.0, (qs[:, k] - q_mid[:, k]) / time_step)
+        evplimit = jnp.minimum(evplimit, fpk * grav / dpk)
+        evplimit = jnp.minimum(evplimit, (prec - evpvint) * grav / dpk)
+        evpprec = jnp.minimum(evplimit, evpprec)
+        if not old_snow:
+            evpprec = jnp.maximum(0.0, evpprec) * OMSM
+
+        # snow evaporation from the post-melt snow fraction
+        fp_pos = fpk > 0.0
+        work1 = jnp.clip(flxsntm / jnp.where(fp_pos, fpk, 1.0), 0.0, 1.0)
+        if not old_snow:
+            work1 = jnp.where(prdsnow[:, k] > prdprec[:, k], 1.0, work1)
+        evpsnow = jnp.where(fp_pos, evpprec * work1, 0.0)
+
+        # vertically integrated evaporation
+        evpvint = evpvint + evpprec * dpk / grav
+
+        # net precip production
+        ntp = prdprec[:, k] - evpprec
+        ntprprd = ntprprd.at[:, k].set(ntp)
+
+        # net snow production
+        if old_snow:
+            if pergro_active:
+                work1b = jnp.clip(fsk / (fpk + 8.64e-11), 0.0, 1.0)
+            else:
+                work1b = jnp.where(fp_pos,
+                                   jnp.clip(fsk / jnp.where(fp_pos, fpk,
+                                                            1.0),
+                                            0.0, 1.0), 0.0)
+            work2 = jnp.maximum(fsnow_conv[:, k], work1b)
+            work2 = jnp.where(snowmlt > 0.0, 0.0, work2)
+            nts = prdprec[:, k] * work2 - evpsnow - snowmlt
+            tssp = prdprec[:, k] * work2 * latice
+            tsse = -(evpsnow + snowmlt) * latice
+        else:
+            sink = jnp.minimum(fsk * grav / dpk, evpsnow + snowmlt)
+            nts = prdsnow[:, k] - sink
+            tssp = prdsnow[:, k] * latice
+            tsse = -sink * latice
+        ntsnprd = ntsnprd.at[:, k].set(nts)
+        tend_s_snwprd = tend_s_snwprd.at[:, k].set(tssp)
+        tend_s_snwevmlt = tend_s_snwevmlt.at[:, k].set(tsse)
+
+        # precipitation fluxes, protected against rounding error
+        flxprec = flxprec.at[:, k + 1].set(
+            jnp.maximum(fpk + ntp * dpk / grav, 0.0))
+        flxsnow = flxsnow.at[:, k + 1].set(
+            jnp.maximum(fsk + nts * dpk / grav, 0.0))
+
+        # heating/cooling and moistening due to evaporation
+        if old_snow:
+            tend_s = tend_s.at[:, k].set(-evpprec * latvap
+                                         + nts * latice)
+        else:
+            tend_s = tend_s.at[:, k].set(-evpprec * latvap + tsse)
+        tend_q = tend_q.at[:, k].set(evpprec)
+
+    # protect against rounding error: enforce flxsnow <= flxprec at
+    # the surface (only possible when prdsnow is active, i.e. with
+    # zm_microphysics; unreachable in this zm_microp=False scope)
+    if not old_snow:
+        excess = flxsnow[:, pver] > flxprec[:, pver]
+        dum = jnp.where(excess,
+                        (flxsnow[:, pver] - flxprec[:, pver]) * grav,
+                        0.0)
+        for k in range(pver - 1, -1, -1):
+            m = (ntsnprd[:, k] > ntprprd[:, k]) & (dum > 0.0)
+            adj = dum / p_del[:, k]
+            ntsnprd = ntsnprd.at[:, k].set(
+                jnp.where(m, ntsnprd[:, k] - adj, ntsnprd[:, k]))
+            tend_s_snwevmlt = tend_s_snwevmlt.at[:, k].set(
+                jnp.where(m, tend_s_snwevmlt[:, k] - adj * latice,
+                          tend_s_snwevmlt[:, k]))
+            tend_s = tend_s.at[:, k].set(
+                jnp.where(m, tend_s[:, k] - adj * latice, tend_s[:, k]))
+            dum = jnp.where(m, 0.0, dum)
+        flxsnow = flxsnow.at[:, pver].set(
+            jnp.where(excess, flxprec[:, pver], flxsnow[:, pver]))
+
+    # output precipitation rates [m/s]
+    prec_out = flxprec[:, pver] / 1000.0
+    snow_out = flxsnow[:, pver] / 1000.0
+
+    return dict(tend_s=tend_s, tend_q=tend_q,
+                tend_s_snwprd=tend_s_snwprd,
+                tend_s_snwevmlt=tend_s_snwevmlt,
+                prec=prec_out, snow=snow_out,
+                ntprprd=ntprprd, ntsnprd=ntsnprd,
+                flxprec=flxprec, flxsnow=flxsnow)
