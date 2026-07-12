@@ -3,6 +3,7 @@ the derivations in eam/src/utils/physconst.F90 (see the f2py stub
 harness/stubs/physconst_stub.F90, which is compiled against the real
 shr_const_mod and is the source of truth for the goldens)."""
 
+SHR_CONST_PI = 3.14159265358979323846
 SHR_CONST_BOLTZ = 1.38065e-23
 SHR_CONST_AVOGAD = 6.02214e26
 SHR_CONST_RGAS = SHR_CONST_AVOGAD * SHR_CONST_BOLTZ
@@ -17,6 +18,7 @@ SHR_CONST_TKTRIP = 273.16
 SHR_CONST_TKFRZ = 273.15
 SHR_CONST_CPDAIR = 1.00464e3
 SHR_CONST_CPWV = 1.810e3
+SHR_CONST_CPFW = 4.188e3
 SHR_CONST_LATICE = 3.337e5
 SHR_CONST_LATVAP = 2.501e6
 SHR_CONST_LATSUB = SHR_CONST_LATICE + SHR_CONST_LATVAP

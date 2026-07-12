@@ -11,12 +11,14 @@ module physconst
       shr_const_latice, shr_const_latsub, shr_const_tkfrz, &
       shr_const_tktrip, shr_const_g, shr_const_stebol, &
       shr_const_karman, shr_const_avogad, shr_const_boltz, &
-      shr_const_rhofw, shr_const_pstd
+      shr_const_rhofw, shr_const_pstd, shr_const_pi, &
+      shr_const_cpfw
   implicit none
 
   real(r8), public, parameter :: avogad = shr_const_avogad
   real(r8), public, parameter :: boltz = shr_const_boltz
   real(r8), public, parameter :: cpair = shr_const_cpdair
+  real(r8), public, parameter :: cpliq = shr_const_cpfw
   real(r8), public, parameter :: cpwv = shr_const_cpwv
   real(r8), public, parameter :: epsilo = shr_const_mwwv/shr_const_mwdair
   real(r8), public, parameter :: gravit = shr_const_g
@@ -27,6 +29,7 @@ module physconst
   real(r8), public, parameter :: latsub = shr_const_latsub
   real(r8), public, parameter :: mwdry = shr_const_mwdair
   real(r8), public, parameter :: mwh2o = shr_const_mwwv
+  real(r8), public, parameter :: pi = shr_const_pi
   real(r8), public, parameter :: rair = shr_const_rdair
   real(r8), public, parameter :: rga = 1._r8/shr_const_g
   real(r8), public, parameter :: rgas = shr_const_rgas
