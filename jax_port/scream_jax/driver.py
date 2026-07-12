@@ -49,11 +49,15 @@ class ScreamPhysics:
 
     def __init__(self, data_dir, hyam, hybm, lat_deg, lon_deg, cell_length,
                  mac_mic_subcycles=6, p3_opts=None, rrtmgp_params=None,
-                 year=2021):
+                 year=2021, spa_col_indices=None):
         """data_dir: directory with the p3 tables/, rrtmgp coefficient
         files and the SPA data file (e3sm-inputdata/atm/scream layout).
         hyam/hybm: hybrid midpoint coefficients (for SHOC's npbl).
-        cell_length: (ncol,) grid spacing for SHOC [m]."""
+        cell_length: (ncol,) grid spacing for SHOC [m].
+        spa_col_indices: optional (ncol,) indices selecting, for each
+        physics column, its source column in the SPA data file — for
+        running on a grid other than the file's (e.g. pg2 physics with
+        an np4 SPA file; operationally SCREAM ships a per-grid file)."""
         d = str(data_dir)
         self.p3_tables = p3_tables.p3_init(f"{d}/tables")
         self.p3_opts = dict(P3_DEFAULT_OPTS, **(p3_opts or {}))
@@ -67,6 +71,13 @@ class ScreamPhysics:
             f"{d}/init/rrtmgp-cloud-optics-coeffs-lw.nc")
         self.spa_data = load_spa_data(
             f"{d}/init/spa_file_unified_and_complete_ne2np4L72_20231222.nc")
+        if spa_col_indices is not None:
+            idx = np.asarray(spa_col_indices)
+            ncol_data = self.spa_data["PS"].shape[1]
+            self.spa_data = {
+                k: (v[:, idx] if (getattr(v, "ndim", 0) >= 2
+                                  and v.shape[1] == ncol_data) else v)
+                for k, v in self.spa_data.items()}
         self.rrtmgp_params = dict(RRTMGP_DEFAULT_PARAMS,
                                   orbital_year=1990,
                                   **(rrtmgp_params or {}))

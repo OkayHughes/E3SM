@@ -29,6 +29,17 @@ Conventions bridged:
 Only mass (hydrostatic, CAM-SE 'T' thermodynamic variable) coupling is
 implemented; theta-based HOMME states convert to T first on the pySEs
 side.
+
+Physics-grid options:
+  - PysesScreamCoupler runs physics directly on the GLL columns (np4
+    physics; SCREAM without pg2).
+  - PysesScreamCouplerPg2 runs physics on the pg-N FV grid the way
+    SCREAM does operationally: the GLL state is remapped with the
+    operational HOMME gllfvremap layer
+    (pyses_ext.finite_volume_grid_operational — dp-weighted theta-form
+    remaps, CAAS-limited tracers, map-tensor winds), physics runs on the
+    E*nf*nf FV columns, and the increments return to GLL with HOMME's
+    tendency(T,uv)/state(q) asymmetry. Requires pySEs importable.
 """
 
 import numpy as np
@@ -204,4 +215,128 @@ class PysesScreamCoupler:
                 self.state[k] = np.asarray(out[k])
 
         forcing = eamxx_to_pyses_forcing(before, out, q_dry, dt)
+        return forcing, out
+
+
+class PysesScreamCouplerPg2:
+    """pg-N (SCREAM-operational) variant of :class:`PysesScreamCoupler`.
+
+    Physics runs on the element-local FV grid (``E*nf*nf`` columns)
+    instead of the GLL points, with the state remapped both ways by the
+    operational gllfvremap layer.  The remap works on pySEs' DRY state
+    (dry layer mass follows the hybrid coordinate, which is what the
+    hydrostatic dp reconstruction assumes); the dry->wet conversion the
+    EAMxx physics needs happens per-column on the FV grid, inside the
+    inner coupler.  SCREAM remaps the wet state instead — an accepted
+    divergence that keeps the bridge consistent with pySEs' dry-mass
+    prognostics.
+
+    Returned forcings are GLL-shaped (E, np, np, lev) tendencies for
+    advance_coupling_step, element-discontinuous like HOMME's before its
+    DSS pass: supply ``dss`` (a callable applied to each forcing field)
+    or project on the pySEs side.
+    """
+
+    def __init__(self, data_dir, h_grid, fv_grid, v_grid, lat_deg, lon_deg,
+                 cell_length, surface, o3_vmr, phis_gll=None, phis_fv=None,
+                 dss=None, neighbor_minmax=None, **coupler_kw):
+        """h_grid/fv_grid/v_grid: pySEs horizontal grid (with the
+        contra/physical map tensors), extended FV grid
+        (init_fv_grid + extend_fv_grid_operational) and vertical grid.
+        lat_deg/lon_deg/cell_length/surface/o3_vmr: per FV COLUMN
+        (E*nf*nf, row-major over (elem, nf, nf)).
+        phis_fv: (E, nf, nf) FV topography (SCREAM's preferred source);
+        phis_gll: (E, np, np) alternative, remapped with the limited
+        scalar remap. dss: optional callable field -> field applied to
+        every returned forcing. neighbor_minmax: optional (qmin, qmax)
+        -> (qmin, qmax) halo-exchange hook for the tracer limiter."""
+        from pyses_ext import finite_volume_grid_operational as opfv
+        self._opfv = opfv
+        self.h_grid, self.fv_grid, self.v_grid = h_grid, fv_grid, v_grid
+        self.nf = int(fv_grid["nf"])
+        self.npt = int(fv_grid["npt"])
+        self.num_elem = int(fv_grid["num_elem"])
+        self.elem_shape = (self.num_elem, self.nf, self.nf)
+        ncol = self.num_elem * self.nf * self.nf
+
+        hyam = np.asarray(v_grid["hybrid_a_m"], dtype=np.float64)
+        hybm = np.asarray(v_grid["hybrid_b_m"], dtype=np.float64)
+        nlev = hyam.size
+        p0 = float(v_grid["reference_surface_mass"])
+        self.ptop = p0 * float(np.asarray(v_grid["hybrid_a_i"])[0])
+        self._zero_phis_gll = np.zeros((self.num_elem, self.npt, self.npt))
+
+        if phis_fv is not None:
+            phis_cols = np.asarray(phis_fv, dtype=np.float64).reshape(ncol)
+        elif phis_gll is not None:
+            phis_cols = columnize(np.asarray(opfv.gll_to_fv_limited(
+                np.asarray(phis_gll, dtype=np.float64), fv_grid)))
+        else:
+            phis_cols = np.zeros(ncol)
+
+        self.inner = PysesScreamCoupler(
+            data_dir, hyam, hybm, lat_deg, lon_deg, cell_length,
+            ncol, nlev, surface, o3_vmr, phis=phis_cols, **coupler_kw)
+        self.dss = dss
+        self.neighbor_minmax = neighbor_minmax
+
+    def step(self, T, horizontal_wind, omega, d_mass_dry, q_dry, dt, nstep,
+             doy_start, surface=None):
+        """One physics step from ELEMENT-SHAPED pySEs prognostics:
+        T/omega/d_mass_dry (E, np, np, lev), horizontal_wind
+        (E, np, np, lev, 2) physical (u, v), q_dry dict of DRY mixing
+        ratios (E, np, np, lev). Returns (forcing dict with GLL-shaped
+        FT [K/s], FU/FV [m/s^2], FQ [dict, 1/s], all pre-DSS unless
+        ``dss`` was supplied; FV-column diagnostics dict)."""
+        opfv = self._opfv
+        T = np.asarray(T, dtype=np.float64)
+        hw = np.asarray(horizontal_wind, dtype=np.float64)
+        omega = np.asarray(omega, dtype=np.float64)
+        dp_dry = np.asarray(d_mass_dry, dtype=np.float64)
+        q_dry = {k: np.asarray(v, dtype=np.float64)
+                 for k, v in q_dry.items()}
+        ps_dry = self.ptop + dp_dry.sum(axis=-1)
+
+        # ---- dynamics -> FV physics columns (dry state) ----
+        fwd = opfv.dyn_to_fv_phys(ps_dry, self._zero_phis_gll, T, hw, omega,
+                                  q_dry, dp_dry, self.h_grid, self.fv_grid,
+                                  self.v_grid)
+        uv_fv = np.asarray(fwd["uv"])
+        q_fv_cols = {k: columnize(np.asarray(v))
+                     for k, v in fwd["q"].items()}
+
+        forcing_cols, out = self.inner.step(
+            columnize(np.asarray(fwd["T"])), columnize(uv_fv[..., 0]),
+            columnize(uv_fv[..., 1]), columnize(np.asarray(fwd["omega"])),
+            columnize(np.asarray(fwd["dp"])), q_fv_cols, self.ptop,
+            dt, nstep, doy_start, surface)
+
+        # ---- FV physics increments -> dynamics grid ----
+        dT_fv = decolumnize(dt * forcing_cols["FT"], self.elem_shape)
+        duv_fv = decolumnize(
+            np.stack([dt * forcing_cols["FU"], dt * forcing_cols["FV"]],
+                     axis=-1), self.elem_shape)
+        q1_fv = {k: decolumnize(q_fv_cols[k] + dt * forcing_cols["FQ"][k],
+                                self.elem_shape)
+                 for k in q_fv_cols}
+        back = opfv.fv_phys_to_dyn(dT_fv, duv_fv, q1_fv, ps_dry, q_dry,
+                                   dp_dry, self.h_grid, self.fv_grid,
+                                   self.v_grid,
+                                   neighbor_minmax=self.neighbor_minmax)
+
+        FM = np.asarray(back["FM"])
+        forcing = {
+            "FT": np.asarray(back["FT"]) / dt,
+            "FU": FM[..., 0] / dt,
+            "FV": FM[..., 1] / dt,
+            "FQ": {k: (np.asarray(back["FQ"][k]) - q_dry[k]) / dt
+                   for k in q1_fv},
+        }
+        if self.dss is not None:
+            forcing = {
+                "FT": self.dss(forcing["FT"]),
+                "FU": self.dss(forcing["FU"]),
+                "FV": self.dss(forcing["FV"]),
+                "FQ": {k: self.dss(v) for k, v in forcing["FQ"].items()},
+            }
         return forcing, out

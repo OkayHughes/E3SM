@@ -237,15 +237,16 @@ map 1:1 onto EAMxx `horiz_winds`.
 Remaining before production pySEs runs: surface fluxes/albedos are
 prescribed (no surface model); omega from pySEs vertical motion; a real
 coupled pySEs+scream_jax integration run (requires the pySEs
-environment); and a decision on physics-grid placement — the bridge
-currently runs physics directly on GLL columns (np4 physics), whereas
-SCREAM operationally runs physics on pg2 via HOMME `gllfvremap`.
-The operational remap layer is now implemented and property-tested in
-`pyses_ext/finite_volume_grid_operational.py` (merge target: pySEs
-`dynamical_cores/finite_volume_grid.py`); wiring it between the bridge
-and the physics driver (columnize `dyn_to_fv_phys` output instead of
-GLL state; feed physics increments to `fv_phys_to_dyn` + DSS) is the
-remaining integration step if pg2 physics is wanted.
+environment). Physics-grid placement is now an option:
+`PysesScreamCoupler` runs physics on GLL columns (np4);
+`PysesScreamCouplerPg2` runs it on the pg-N FV grid the way SCREAM
+does operationally, via `pyses_ext/finite_volume_grid_operational.py`
+(smoke-tested end-to-end in `tests/test_pyses_bridge_pg2.py`; forcing
+is returned pre-DSS — supply the `dss` hook or project on the pySEs
+side). The pg2 path remaps the DRY state (documented divergence from
+SCREAM's wet remap, consistent with pySEs' dry-mass prognostics), and
+`ScreamPhysics` gained `spa_col_indices` to source SPA data for a
+physics grid that differs from the data file's grid.
 
 ## Pending (next in port order — see PORTING_PLAN.md §5)
 
