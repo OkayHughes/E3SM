@@ -63,9 +63,12 @@ source files changed upstream before trusting them.
 | `scream_jax/shoc/third_moments.py` | impl/ `shoc_compute_diag_third_shoc_moment`, `shoc_clipping_diag_third_shoc_moments`, `shoc_diag_third_shoc_moments` (driver) | d957a16d34 | Claude (Fable 5) | draft |
 | `scream_jax/shoc/assumed_pdf.py` | impl/ `shoc_assumed_pdf` (driver) + 12 `shoc_assumed_pdf_*` kernels | d957a16d34 | Claude (Fable 5) | draft |
 | `scream_jax/shoc/pblintd.py` | impl/ `shoc_pblintd_init_pot`, `pblintd_height`, `pblintd_surf_temp`, `pblintd_check_pblh`, `shoc_pblintd_cldcheck`, `pblintd` (driver) | d957a16d34 | Claude (Fable 5) | draft |
+| `scream_jax/shoc/main.py` | impl/ `shoc_main` (`shoc_init` + `shoc_main_internal` loop) | d957a16d34 | Claude (Fable 5) | draft (whole-scheme water/energy budget invariants pass) |
 
-All ~57 SHOC kernels are ported. Remaining: `shoc_main` driver,
-process-interface pre/post conversions, Tier-1 golden validation.
+All ~57 SHOC kernels AND the `shoc_main` driver are ported. Remaining:
+process-interface pre/post conversions (`eamxx_shoc_process_interface.cpp`
+SHOCPreprocess/SHOCPostprocess), then Tier-1 golden validation against
+`jax_port/golden/shoc_218x72_dt1800_5steps.npz`.
 Whole-scheme validation target: `jax_port/golden/shoc_218x72_dt1800_5steps.npz`.
 
 ## Pending (next in port order — see PORTING_PLAN.md §5)

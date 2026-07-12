@@ -17,6 +17,7 @@ Conventions (identical to EAMxx/C++):
 
 from . import constants
 from .assumed_pdf import shoc_assumed_pdf
+from .main import shoc_init, shoc_main
 from .energy import (
     shoc_energy_fixer,
     shoc_energy_integrals,
