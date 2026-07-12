@@ -54,8 +54,13 @@ def back_to_cell_average(cld_frac_l, cld_frac_r, cld_frac_i, tends,
 
     out = {}
     for name, arr in tends.items():
-        f = fr[_SCALE_MAP[name]]
         arr = jnp.asarray(arr)
+        if name not in _SCALE_MAP:
+            # e.g. qv2qi_nucleat_tend / ni_nucleat_tend: passed to the C++
+            # function but not scaled (already cell-average rates)
+            out[name] = arr
+            continue
+        f = fr[_SCALE_MAP[name]]
         out[name] = jnp.where(context, arr * f, arr)
     return out
 
