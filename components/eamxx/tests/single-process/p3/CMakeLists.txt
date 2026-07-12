@@ -17,6 +17,7 @@ SetVarDependingOnTestSize(NUM_STEPS 2 5 48)  # 1h 2.5h 24h
 set (RUN_T0 2021-10-12-45000)
 
 ## Copy (and configure) yaml files needed by tests
+set (POSTFIX "")
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/input.yaml
                ${CMAKE_CURRENT_BINARY_DIR}/input.yaml)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/output.yaml
@@ -79,4 +80,60 @@ if (SCREAM_ENABLE_BASELINE_TESTS)
   file (APPEND ${SCREAM_TEST_OUTPUT_DIR}/baseline_list
     "${SRC_FILE}\n"
   )
+endif()
+
+if (EAMXX_ENABLE_PYTHON)
+  #####################################
+  #             P3 (JAX)              #
+  #####################################
+  # Swap the whole P3 step for the scream_jax implementation (see
+  # jax_port/TEST_HARNESS_DESIGN.md) and compare against the C++ run.
+  # Requires `jax` importable by the embedded interpreter.
+
+  set (POSTFIX _jax)
+  set (PY_MODULE_NAME "p3_jax")
+  set (PY_MODULE_PATH ${SCREAM_BASE_DIR}/../../jax_port/scream_jax/adapters/eamxx)
+  set (PY_BACKEND "host")
+  configure_file(${CMAKE_CURRENT_SOURCE_DIR}/input.yaml
+                 ${CMAKE_CURRENT_BINARY_DIR}/input_jax.yaml)
+  configure_file(${CMAKE_CURRENT_SOURCE_DIR}/output.yaml
+                 ${CMAKE_CURRENT_BINARY_DIR}/output_jax.yaml)
+
+  CreateUnitTestFromExec(${TEST_BASE_NAME}_jax ${TEST_BASE_NAME}
+    EXE_ARGS "--args -ifile=input_jax.yaml"
+    LABELS p3 physics
+    FIXTURES_SETUP p3_jax)
+
+  # Compare against the C++ (np1) run. Tolerance-based (the JAX port is
+  # not BFB). Single-step agreement is at roundoff level for the whole
+  # warm/thermo path (see jax_port/tests/test_p3_golden.py), but ice
+  # sedimentation amplifies roundoff through discontinuous branches
+  # (verified inherent by feeding the REAL C++ ice sed two part2 states
+  # differing by 1e-13: same divergence), and over this multi-step
+  # coupled run that noise feeds back into the liquid fields (melt/
+  # collection). T_mid/qv stay roundoff-clean over all steps and keep
+  # tight bounds; everything touching the ice feedback gets a
+  # bounded-outlier criterion.
+  set (SRC_FILE "${TEST_BASE_NAME}_output.INSTANT.nsteps_x1.np1.${RUN_T0}.nc")
+  set (TGT_FILE "${TEST_BASE_NAME}_jax_output.INSTANT.nsteps_x1.np1.${RUN_T0}.nc")
+  add_test (NAME ${TEST_BASE_NAME}_cpp_vs_jax_strict
+            COMMAND ${Python_EXECUTABLE} ${SCREAM_BASE_DIR}/../../jax_port/harness/compare_nc_tolerant.py
+            -s ${SRC_FILE} -t ${TGT_FILE} --tol 1e-6 --hard-tol 1e-2 --max-frac 1e-3
+            -v T_mid T_prev_micro_step qv qv_prev_micro_step rainfrac
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+  set_tests_properties(${TEST_BASE_NAME}_cpp_vs_jax_strict PROPERTIES
+        LABELS "p3;infrastructure"
+        FIXTURES_REQUIRED "p3_jax;${FIXTURES_BASE_NAME}_np1_omp1")
+  add_test (NAME ${TEST_BASE_NAME}_cpp_vs_jax_ice_feedback
+            COMMAND ${Python_EXECUTABLE} ${SCREAM_BASE_DIR}/../../jax_port/harness/compare_nc_tolerant.py
+            -s ${SRC_FILE} -t ${TGT_FILE} --tol 1e-6 --hard-tol 0.5 --max-frac 0.1
+            -v qc nc qr nr qi ni qm bm
+               eff_radius_qc eff_radius_qr eff_radius_qi
+               precip_liq_surf_mass precip_ice_surf_mass
+               micro_liq_ice_exchange micro_vap_liq_exchange
+               micro_vap_ice_exchange
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+  set_tests_properties(${TEST_BASE_NAME}_cpp_vs_jax_ice_feedback PROPERTIES
+        LABELS "p3;infrastructure"
+        FIXTURES_REQUIRED "p3_jax;${FIXTURES_BASE_NAME}_np1_omp1")
 endif()

@@ -1,5 +1,13 @@
 # JAX Port — Status Ledger
 
+> **P3 TIER-2 SWAP-TESTED (2026-07-12):** `p3_standalone_cpp_vs_jax_strict`
+> and `_ice_feedback` pass in-container: the whole P3 step swapped for
+> scream_jax via the embedded-Python bridge over a 5-step coupled run.
+> T_mid/qv/rainfrac stay within 1e-6 field-scale error at >99.9% of
+> points (max 9e-7 for T_mid); hydrometeor fields carry the documented
+> ice-sed knife-edge feedback, bounded (qc max 1.4e-3 at 0.5% of points).
+> All 14 p3 standalone tests pass (incl. the original np1-np4 BFB family).
+>
 > **P3 TIER-1 VALIDATED (2026-07-12):** The complete P3 port (tables,
 > ~30 process kernels, parts 1/2/3, sedimentation, homogeneous freezing,
 > p3_main, process pre/post) replays the EAMxx golden archive (5 steps,
@@ -122,7 +130,8 @@ Whole-scheme validation target: `jax_port/golden/shoc_218x72_dt1800_5steps.npz`.
 | `scream_jax/p3/main_part3.py` | impl/ `p3_main_impl_part3.hpp` + calc_bulk_rho_rime | d957a16d34 | Claude (Fable 5) | **kernel-golden** (BFB vs `p3_main_part3_host`) |
 | `scream_jax/p3/sedimentation.py` | impl/ `p3_find`, `p3_upwind`, `p3_cloud_sed`, `p3_rain_sed`, `p3_ice_sed` (incl. homogeneous_freezing) | d957a16d34 | Claude (Fable 5) | **kernel-golden** (ice sed 5e-21 vs `ice_sedimentation_host`; cloud/rain sed BFB in stage pipeline) |
 | `scream_jax/p3/main.py` | impl/ `p3_main_impl.hpp` (init + orchestration + early exits) | d957a16d34 | Claude (Fable 5) | **kernel-golden** (whole-main vs `p3_main_host`: warm fields <=1e-13, ice knife-edge bounded) |
-| `scream_jax/p3/process.py` | `eamxx_p3_process_interface.hpp/.cpp`, `eamxx_p3_run.cpp` (preamble/postamble, wet<->dry, cld-frac max-overlap) | d957a16d34 | Claude (Fable 5) | **kernel-golden** (Tier-1 golden replay passes) |
+| `scream_jax/p3/process.py` | `eamxx_p3_process_interface.hpp/.cpp`, `eamxx_p3_run.cpp` (preamble/postamble, wet<->dry, cld-frac max-overlap) | d957a16d34 | Claude (Fable 5) | **swap-tested** (`p3_standalone_cpp_vs_jax_*`) |
+| `scream_jax/adapters/eamxx/p3_jax.py` | py_module_call in `eamxx_p3_run.cpp` (this branch) | d957a16d34 | Claude (Fable 5) | **swap-tested** |
 
 Tier-0/Tier-1 status: `pytest jax_port/tests/` — 119 passing, including
 `test_p3_golden.py` (Tier-1 replay) and `test_p3_main.py` /
@@ -141,9 +150,9 @@ Notes:
   respective compile commands (link line from
   `CMakeFiles/p3_tests.dir/link.txt`).
 
-Next for P3: Tier-2 swap test (C++ EAMXX_HAS_PYTHON branch in
-`eamxx_p3_process_interface.cpp` + `p3_jax.py` adapter + single-process
-CMake test, mirroring SHOC's).
+P3 is complete through Tier-2. Next per PORTING_PLAN.md §5: RRTMGP
+radiation (or SPA/nudging depending on priorities) and the pySEs-side
+assembly of the validated shoc/cld_fraction/p3 chain.
 
 ## Pending (next in port order — see PORTING_PLAN.md §5)
 

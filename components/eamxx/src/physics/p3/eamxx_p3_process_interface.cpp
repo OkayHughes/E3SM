@@ -8,6 +8,10 @@
 
 #include <array>
 
+#ifdef EAMXX_HAS_PYTHON
+#include "share/atm_process/atmosphere_process_pyhelpers.hpp"
+#endif
+
 namespace scream
 {
 
@@ -518,6 +522,15 @@ void P3Microphysics::initialize_impl (const RunType /* run_type */)
   // Setup WSM for internal local variables
   const auto policy = TPF::get_default_team_policy(m_num_cols, nk_pack);
   workspace_mgr.setup(m_buffer.wsm_data, nk_pack_p1, 52, policy);
+
+#ifdef EAMXX_HAS_PYTHON
+  if (has_py_module()) {
+    // Hand the python implementation the ice lookup table location
+    const std::string table_file = std::string(P3F::P3C::p3_lookup_base)
+                                 + std::string(P3F::P3C::p3_version);
+    py_module_call("init", table_file);
+  }
+#endif
 }
 
 // =========================================================================================

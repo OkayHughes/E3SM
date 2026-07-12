@@ -16,6 +16,9 @@ eamxx:
     do_prescribed_ccn: false
     use_hetfrz_classnuc: false
     internal_diagnostics_level: 2
+    py_module_name: ${PY_MODULE_NAME}
+    py_module_path: ${PY_MODULE_PATH}
+    py_backend: ${PY_BACKEND}
 
 grids_manager:
   type: mesh_free
@@ -36,5 +39,5 @@ initial_conditions:
 
 # The parameters for I/O control
 scorpio:
-  output_yaml_files: ["output.yaml"]
+  output_yaml_files: ["output${POSTFIX}.yaml"]
 ...
