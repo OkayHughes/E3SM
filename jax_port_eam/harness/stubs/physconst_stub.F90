@@ -33,6 +33,7 @@ module physconst
   real(r8), public, parameter :: rair = shr_const_rdair
   real(r8), public, parameter :: rga = 1._r8/shr_const_g
   real(r8), public, parameter :: rgas = shr_const_rgas
+  real(r8), public, parameter :: r_universal = shr_const_rgas
   real(r8), public, parameter :: rh2o = shr_const_rwv
   real(r8), public, parameter :: rhoh2o = shr_const_rhofw
   real(r8), public, parameter :: stebol = shr_const_stebol

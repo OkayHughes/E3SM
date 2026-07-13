@@ -8,14 +8,24 @@ and the precip / reserved-liquid integrals.
 
 PORT_NOTES
 ----------
-- SCOPE: zm_param%zm_microp = False only (the simple in-plume
-  condensation path; itnum = 1). The EAMv3 default is
-  zmconv_microp=.true., but zm_microphysics.F90 (3300 lines) needs the
-  aerosol activation stack and is deferred (PORTING_PLAN.md row 9).
-  The Fortran golden harness runs with the same flag false, so goldens
-  and port match. MCSP and zm_aero paths are inactive by construction
-  (mcsp lives in zm_conv_intr/zm_conv_mcsp; aero is only touched under
-  zm_microp).
+- SCOPE: BOTH zm_param%zm_microp branches. zm_microp=False is the
+  simple in-plume condensation path (itnum = 1). zm_microp=True (the
+  EAMv3 default, zmconv_microp) runs the Fortran itnum=2 iteration
+  with the convective microphysics of eam_jax/zm_microphysics.py
+  (zm_mphy + the REAL activate_drop_mam / nucleate_ice_conv
+  activation, modal aerosols only - see that module's PORT_NOTES and
+  PORTING_PLAN.md row 9): freezing-coupled updraft MSE and
+  condensation, cloud-top freezing feedback (tot_frz), downdraft
+  evp <= rprd cap, evp-proportional sprd/frz removal, the
+  pflxs<=pflx snow fixer, jt>=jlcl column disable, latice*frz
+  heating + microphysical detrainment tendencies
+  (dif/dnlf/dnif/dsf/dnsf) in zm_calc_output_tend, the
+  zm_microphysics_adjust negative-water fixer, the mx-jt<2 closure
+  disable, and the dif/dsf terms in prec/rliq plus rice. zm_conv_main
+  then needs aero= (ungathered modal-aerosol dict) and returns
+  'microp' (column-scattered zm_microp_st fields, zm_mphy names) and
+  'rice'. MCSP stays inactive by construction (it lives in
+  zm_conv_intr/zm_conv_mcsp).
 - zm_conv_evap (below-cloud Sundqvist evaporation of convective
   precip + snow melt/production) IS ported here, together with the
   real cloud_fraction.F90 cldfrc_fice it calls (T-based ice/snow
@@ -94,6 +104,9 @@ import jax.numpy as jnp
 from .wv_sat import qsat as _qsat_pa
 from .zm_cape import compute_dilute_cape, make_zm_const, qsat_hpa
 from .zm_cape import make_zm_param as _make_cape_param
+from .zm_microphysics import (zm_mphy, zm_microphysics_adjust,
+                              make_mphyi, make_actdrop_params,
+                              MUCON, DCON, _divs)
 
 __all__ = ["make_zm_const", "make_zm_param", "zm_conv_main",
            "cldfrc_fice", "zm_conv_evap"]
@@ -121,11 +134,16 @@ def make_zm_param(tau=3600.0, alfa=0.14, ke=2.5e-6, dmpdz=-0.7e-3,
                   c0_lnd=0.0020, c0_ocn=0.0020, num_cin=1, limcnv=1,
                   mx_bot_lyr_adj=1, trig_dcape=True, trig_ull=True,
                   clos_dyn_adj=True, no_deep_pbl=False,
-                  old_snow=False):
-    """zm_param_t subset used by zm_conv_main with zm_microp=False.
-    Defaults are the EAMv3 phys="default" namelist values (see the
-    golden generator header); limcnv is the 1-based interface index
-    from the 40 hPa rule and must be supplied per grid."""
+                  old_snow=False, zm_microp=False, auto_fac=7.0,
+                  accr_fac=1.5, micro_dcs=150.0e-6):
+    """zm_param_t subset used by zm_conv_main. Defaults are the EAMv3
+    phys="default" namelist values (see the golden generator header);
+    limcnv is the 1-based interface index from the 40 hPa rule and
+    must be supplied per grid. zm_microp=True (the EAMv3 default,
+    zmconv_microp) activates the convective microphysics path, which
+    also needs the aero object + time step passed to zm_conv_main;
+    auto_fac/accr_fac/micro_dcs are zmconv_auto_fac/accr_fac/
+    micro_dcs (only used under zm_microp)."""
     zp = _make_cape_param(dmpdz=dmpdz, tiedke_add=tiedke_add,
                           tpert_fac=tpert_fac,
                           mx_bot_lyr_adj=mx_bot_lyr_adj,
@@ -135,7 +153,8 @@ def make_zm_param(tau=3600.0, alfa=0.14, ke=2.5e-6, dmpdz=-0.7e-3,
               c0_lnd=float(c0_lnd), c0_ocn=float(c0_ocn),
               limcnv=int(limcnv), clos_dyn_adj=bool(clos_dyn_adj),
               no_deep_pbl=bool(no_deep_pbl), old_snow=bool(old_snow),
-              zm_microp=False)
+              zm_microp=bool(zm_microp), auto_fac=float(auto_fac),
+              accr_fac=float(accr_fac), micro_dcs=float(micro_dcs))
     return zp
 
 
@@ -329,6 +348,9 @@ def zm_downdraft_properties(jb, jt0, j0, z_int, dz, s_mid, q_mid,
                    / dz[:, j])
         evp_new = jnp.maximum(evp_new, 0.0)
         mdt = jnp.minimum(mflx_dn[:, j + 1], -SMALL)
+        if zp.get("zm_microp", False):
+            evp_new = jnp.where(m, jnp.minimum(evp_new, rprd[:, j]),
+                                evp_new)
         sd_new = ((zc["latvap"] / zc["cpair"] * evp_new
                    - entr_dn[:, j] * s_mid[:, j]) * dz[:, j]
                   + mflx_dn[:, j] * s_dnd[:, j]) / mdt
@@ -346,9 +368,14 @@ def zm_downdraft_properties(jb, jt0, j0, z_int, dz, s_mid, q_mid,
 
 def zm_cloud_properties(p_mid, z_mid, z_int, t_mid, s_mid, s_int,
                         q_mid, landfrac, tpert_g, jb, lel, msg, zc,
-                        zp):
-    """Updraft/downdraft plume properties (zm_microp=False branch,
-    itnum=1). All inputs gathered, 0-based indices. Returns a dict."""
+                        zp, aero=None, deltat=None, mp=None, ap=None):
+    """Updraft/downdraft plume properties. All inputs gathered,
+    0-based indices; jb here is the launch level mx. Returns a dict.
+    With zp['zm_microp'] the Fortran itnum=2 iteration runs and the
+    convective microphysics (eam_jax.zm_microphysics.zm_mphy, modal
+    aerosols) replaces the simple c0 in-plume condensate path; aero is
+    the modal-aerosol dict (gathered arrays) and deltat the model time
+    step."""
     n, pver = t_mid.shape
     rows = jnp.arange(n)
     ki = jnp.arange(pver)[None, :]
@@ -439,163 +466,274 @@ def zm_cloud_properties(p_mid, z_mid, z_int, t_mid, s_mid, s_int,
     lm_pos = lambda_max > 0.0
     lm_safe = jnp.where(lm_pos, lambda_max, 1.0)
 
-    # ---- single-iteration (itnum=1) plume property pass ----
+    # ---- plume property passes (Fortran iter loop 1496-1794;
+    # itnum=2 with convective microphysics, else 1) ----
+    zm_microp = bool(zp.get("zm_microp", False))
+    itnum = 2 if zm_microp else 1
     cu = jnp.zeros((n, pver))
     ql = jnp.zeros((n, pver))
     totpcp = jnp.zeros(n)
     mflx_up = jnp.zeros((n, pver))
     entr_up = jnp.zeros((n, pver))
     detr_up = jnp.zeros((n, pver))
-
-    mflx_up = mflx_up.at[rows, jb].set(jnp.where(lm_pos, 1.0, 0.0))
-    entr_up = entr_up.at[rows, jb].set(
-        jnp.where(lm_pos, 1.0 / dz[rows, jb], 0.0))
-    z_int_jb = z_int[rows, jb]
-    for j in range(pver - 1, msg - 1, -1):
-        m = lm_pos & (j >= jt0) & (j < jb)
-        zuef = z_int[:, j] - z_int_jb
-        zuef_s = jnp.where(m, zuef, 1.0)
-        rmue = ((1.0 / lm_safe)
-                * (jnp.exp(lam[:, j + 1] * zuef_s) - 1.0) / zuef_s)
-        mf = ((1.0 / lm_safe)
-              * (jnp.exp(lam[:, j] * zuef_s) - 1.0) / zuef_s)
-        entr_up = entr_up.at[:, j].set(
-            jnp.where(m, (rmue - mflx_up[:, j + 1]) / dz[:, j],
-                      entr_up[:, j]))
-        detr_up = detr_up.at[:, j].set(
-            jnp.where(m, (rmue - mf) / dz[:, j], detr_up[:, j]))
-        mflx_up = mflx_up.at[:, j].set(
-            jnp.where(m, mf, mflx_up[:, j]))
-
-    kh0 = int(jnp.min(lel))   # khighest (0-based)
-    kl0 = int(jnp.max(jb))    # klowest  (0-based)
-
-    # updraft MSE recursion with weak-plume pruning (bottom -> top)
-    for j in range(kl0 - 1, kh0 - 1, -1):
-        act = (j <= jb - 1) & (j >= lel) & lm_pos
-        weak = act & (mflx_up[:, j] < 0.02)
-        strong = act & ~weak
-        mf_s = jnp.where(mflx_up[:, j] != 0.0, mflx_up[:, j], 1.0)
-        hu_new = (mflx_up[:, j + 1] / mf_s * h_upd[:, j + 1]
-                  + dz[:, j] / mf_s
-                  * (entr_up[:, j] * h_env[:, j]
-                     - detr_up[:, j] * h_env_sat[:, j]))
-        h_upd = h_upd.at[:, j].set(
-            jnp.where(weak, h_env[:, j],
-                      jnp.where(strong, hu_new, h_upd[:, j])))
-        detr_up = detr_up.at[:, j].set(
-            jnp.where(weak, mflx_up[:, j + 1] / dz[:, j],
-                      detr_up[:, j]))
-        mflx_up = mflx_up.at[:, j].set(
-            jnp.where(weak, 0.0, mflx_up[:, j]))
-        entr_up = entr_up.at[:, j].set(
-            jnp.where(weak, 0.0, entr_up[:, j]))
-
-    # cloud-top search (bottom -> top; tot_frz = 0 with microp off)
-    doit = jnp.ones(n, dtype=bool)
-    tot_frz = jnp.zeros(n)
-    h_upd_jb = h_upd[rows, jb]
-    for j in range(kl0 - 2, kh0 - 2, -1):
-        if j < 0:
-            break
-        cond = doit & (j <= jb - 2) & (j >= lel - 1)
-        b1 = (cond & (h_upd[:, j] <= hsthat[:, j])
-              & (h_upd[:, j + 1] > hsthat[:, j + 1])
-              & (mflx_up[:, j] >= MU_MIN))
-        b1_low = b1 & (h_upd[:, j] - hsthat[:, j] < HU_DIFF_MIN)
-        b2 = (cond & ~b1
-              & (((h_upd[:, j] > h_upd_jb) & (tot_frz <= 0.0))
-                 | (mflx_up[:, j] < MU_MIN)))
-        jt0 = jnp.where(b1_low | b2, j + 1, jnp.where(b1, j, jt0))
-        doit = doit & ~(b1 | b2)
-
-    # zero the plume above the top; detrain what is left at the top
-    for j in range(pver - 1, msg - 1, -1):
-        m1 = (j >= lel) & (j <= jt0) & lm_pos
-        mflx_up = mflx_up.at[:, j].set(
-            jnp.where(m1, 0.0, mflx_up[:, j]))
-        entr_up = entr_up.at[:, j].set(
-            jnp.where(m1, 0.0, entr_up[:, j]))
-        detr_up = detr_up.at[:, j].set(
-            jnp.where(m1, 0.0, detr_up[:, j]))
-        h_upd = h_upd.at[:, j].set(jnp.where(m1, h_env[:, j],
-                                             h_upd[:, j]))
-        m2 = (j == jt0) & lm_pos
-        jp1 = min(j + 1, pver - 1)  # m2 empty at j=pver-1 (jt<jb<=pver-1)
-        detr_up = detr_up.at[:, j].set(
-            jnp.where(m2, mflx_up[:, jp1] / dz[:, j], detr_up[:, j]))
-        entr_up = entr_up.at[:, j].set(
-            jnp.where(m2, 0.0, entr_up[:, j]))
-        mflx_up = mflx_up.at[:, j].set(
-            jnp.where(m2, 0.0, mflx_up[:, j]))
-
-    # LCL search with s/q recursion (bottom -> top, sequential)
-    done = jnp.zeros(n, dtype=bool)
-    for j in range(pver - 1, msg, -1):
-        mjb = (j == jb) & lm_pos
-        q_upd = q_upd.at[:, j].set(
-            jnp.where(mjb, q_mid[:, j], q_upd[:, j]))
-        s_upd = s_upd.at[:, j].set(
-            jnp.where(mjb, (h_upd[:, j]
-                            - zc["latvap"] * q_upd[:, j])
-                      / zc["cpair"], s_upd[:, j]))
-        m = (~done) & (j > jt0) & (j < jb) & lm_pos
-        mf_s = jnp.where(mflx_up[:, j] != 0.0, mflx_up[:, j], 1.0)
-        su_new = (mflx_up[:, j + 1] / mf_s * s_upd[:, j + 1]
-                  + dz[:, j] / mf_s
-                  * (entr_up[:, j] - detr_up[:, j]) * s_mid[:, j])
-        qu_new = (mflx_up[:, j + 1] / mf_s * q_upd[:, j + 1]
-                  + dz[:, j] / mf_s
-                  * (entr_up[:, j] * q_mid[:, j]
-                     - detr_up[:, j] * qst[:, j]))
-        s_upd = s_upd.at[:, j].set(jnp.where(m, su_new, s_upd[:, j]))
-        q_upd = q_upd.at[:, j].set(jnp.where(m, qu_new, q_upd[:, j]))
-        tu = s_upd[:, j] - zc["grav"] / zc["cpair"] * z_int[:, j]
-        _estu, qstu = qsat_hpa(
-            tu, (p_mid[:, j] + p_mid[:, j - 1]) / 2.0)
-        lclm = m & (q_upd[:, j] >= qstu)
-        jlcl = jnp.where(lclm, j, jlcl)
-        done = done | lclm
-
-    # wet-adiabatic s/q between the top and the LCL
-    m = ((ki > jt0[:, None]) & (ki <= jlcl[:, None])
-         & lm_pos[:, None])
-    s_upd = jnp.where(m, s_int + (h_upd - hsthat)
-                      / (zc["cpair"] * (1.0 + gamhat)), s_upd)
-    q_upd = jnp.where(m, qsthat + gamhat * (h_upd - hsthat)
-                      / (zc["latvap"] * (1.0 + gamhat)), q_upd)
-
-    # condensation rate in the updraft
-    for j in range(pver - 1, msg, -1):
-        m = lm_pos & (j >= jt0) & (j < jb)
-        cu_new = (((mflx_up[:, j] * s_upd[:, j]
-                    - mflx_up[:, j + 1] * s_upd[:, j + 1]) / dz[:, j]
-                   - (entr_up[:, j] - detr_up[:, j]) * s_mid[:, j])
-                  / (zc["latvap"] / zc["cpair"]))
-        cu_new = jnp.where(j == jt0, 0.0, cu_new)
-        cu = cu.at[:, j].set(
-            jnp.where(m, jnp.maximum(0.0, cu_new), cu[:, j]))
-
-    # in-plume liquid, rain production, total precip (no-microp path)
     rprd = jnp.zeros((n, pver))
-    for j in range(pver - 1, msg, -1):
-        m = ((j >= jt0) & (j < jb) & lm_pos
-             & (mflx_up[:, j] >= 0.0))
-        pos = m & (mflx_up[:, j] > 0.0)
-        mf_s = jnp.where(mflx_up[:, j] != 0.0, mflx_up[:, j], 1.0)
-        ql1 = (1.0 / mf_s
-               * (mflx_up[:, j + 1] * ql[:, j + 1]
-                  - dz[:, j] * detr_up[:, j] * ql[:, j + 1]
-                  + dz[:, j] * cu[:, j]))
-        ql = ql.at[:, j].set(
-            jnp.where(pos, ql1 / (1.0 + dz[:, j] * c0mask),
-                      jnp.where(m, 0.0, ql[:, j])))
-        totpcp = totpcp + jnp.where(
-            m, dz[:, j] * (cu[:, j] - detr_up[:, j] * ql[:, j + 1]),
-            0.0)
-        rprd = rprd.at[:, j].set(
-            jnp.where(m, c0mask * mflx_up[:, j] * ql[:, j],
-                      rprd[:, j]))
+    tmp_frz = jnp.zeros((n, pver))     # zm_mphy freezing rate
+    frz_st = jnp.zeros((n, pver))      # loc_microp_st%frz
+    jto = jnp.array(jt0)
+    microp = None
+    if zm_microp:
+        if mp is None:
+            mp = make_mphyi()
+        if ap is None:
+            ap = make_actdrop_params(aero["sigmag_amode"])
+        # loc_microp_st%lambdadpcu / mudpcu seeds, persistent across
+        # the two zm_mphy calls (intent(inout) lamc/pgam)
+        lamc_arr = jnp.full((n, pver), (MUCON + 1.0) / DCON)
+        pgam_arr = jnp.full((n, pver), MUCON)
+
+    z_int_jb = z_int[rows, jb]
+    for itr in range(1, itnum + 1):
+        # per-iteration reset (Fortran 1498-1512); qliq/qice/frz are
+        # re-initialized inside zm_mphy itself
+        cu = jnp.zeros((n, pver))
+        ql = jnp.zeros((n, pver))
+        totpcp = jnp.zeros(n)
+        if zm_microp:
+            h_upd = h_upd.at[rows, jb].set(
+                h_env[rows, jb] + zc["cpair"] * zp["tiedke_add"])
+
+        # updraft mass-flux profile (recomputed every iteration; with
+        # microphysics the profile extends to lel instead of jt)
+        mflx_up = mflx_up.at[rows, jb].set(jnp.where(lm_pos, 1.0,
+                                                     mflx_up[rows, jb]))
+        entr_up = entr_up.at[rows, jb].set(
+            jnp.where(lm_pos, 1.0 / dz[rows, jb], entr_up[rows, jb]))
+        klimit = lel if zm_microp else jt0
+        for j in range(pver - 1, msg - 1, -1):
+            m = lm_pos & (j >= klimit) & (j < jb)
+            zuef = z_int[:, j] - z_int_jb
+            zuef_s = jnp.where(m, zuef, 1.0)
+            rmue = ((1.0 / lm_safe)
+                    * (jnp.exp(lam[:, j + 1] * zuef_s) - 1.0) / zuef_s)
+            mf = ((1.0 / lm_safe)
+                  * (jnp.exp(lam[:, j] * zuef_s) - 1.0) / zuef_s)
+            entr_up = entr_up.at[:, j].set(
+                jnp.where(m, (rmue - mflx_up[:, j + 1]) / dz[:, j],
+                          entr_up[:, j]))
+            detr_up = detr_up.at[:, j].set(
+                jnp.where(m, (rmue - mf) / dz[:, j], detr_up[:, j]))
+            mflx_up = mflx_up.at[:, j].set(
+                jnp.where(m, mf, mflx_up[:, j]))
+
+        kh0 = int(jnp.min(lel))   # khighest (0-based)
+        kl0 = int(jnp.max(jb))    # klowest  (0-based)
+
+        # updraft MSE recursion with weak-plume pruning (bottom -> top)
+        for j in range(kl0 - 1, kh0 - 1, -1):
+            act = (j <= jb - 1) & (j >= lel) & lm_pos
+            weak = act & (mflx_up[:, j] < 0.02)
+            strong = act & ~weak
+            mf_s = jnp.where(mflx_up[:, j] != 0.0, mflx_up[:, j], 1.0)
+            if zm_microp:
+                den = mflx_up[:, j] + dz[:, j] * detr_up[:, j]
+                den_s = jnp.where(den != 0.0, den, 1.0)
+                hu_new = ((mflx_up[:, j + 1] * h_upd[:, j + 1]
+                           + dz[:, j] * (entr_up[:, j] * h_env[:, j]
+                                         + zc["latice"]
+                                         * tmp_frz[:, j]))
+                          / den_s)
+            else:
+                hu_new = (mflx_up[:, j + 1] / mf_s * h_upd[:, j + 1]
+                          + dz[:, j] / mf_s
+                          * (entr_up[:, j] * h_env[:, j]
+                             - detr_up[:, j] * h_env_sat[:, j]))
+            h_upd = h_upd.at[:, j].set(
+                jnp.where(weak, h_env[:, j],
+                          jnp.where(strong, hu_new, h_upd[:, j])))
+            detr_up = detr_up.at[:, j].set(
+                jnp.where(weak, mflx_up[:, j + 1] / dz[:, j],
+                          detr_up[:, j]))
+            mflx_up = mflx_up.at[:, j].set(
+                jnp.where(weak, 0.0, mflx_up[:, j]))
+            entr_up = entr_up.at[:, j].set(
+                jnp.where(weak, 0.0, entr_up[:, j]))
+
+        # cloud-top search (bottom -> top; tot_frz couples the
+        # previous iteration's freezing into the reset criterion)
+        doit = jnp.ones(n, dtype=bool)
+        tot_frz = jnp.zeros(n)
+        for j in range(pver - 1, msg - 1, -1):
+            tot_frz = tot_frz + tmp_frz[:, j] * dz[:, j]
+        h_upd_jb = h_upd[rows, jb]
+        for j in range(kl0 - 2, kh0 - 2, -1):
+            if j < 0:
+                break
+            cond = doit & (j <= jb - 2) & (j >= lel - 1)
+            b1 = (cond & (h_upd[:, j] <= hsthat[:, j])
+                  & (h_upd[:, j + 1] > hsthat[:, j + 1])
+                  & (mflx_up[:, j] >= MU_MIN))
+            b1_low = b1 & (h_upd[:, j] - hsthat[:, j] < HU_DIFF_MIN)
+            b2 = (cond & ~b1
+                  & (((h_upd[:, j] > h_upd_jb) & (tot_frz <= 0.0))
+                     | (mflx_up[:, j] < MU_MIN)))
+            jt0 = jnp.where(b1_low | b2, j + 1, jnp.where(b1, j, jt0))
+            doit = doit & ~(b1 | b2)
+
+        if itr == 1:
+            jto = jnp.array(jt0)
+
+        # zero the plume above the top; detrain what is left at the top
+        for j in range(pver - 1, msg - 1, -1):
+            m1 = (j >= lel) & (j <= jt0) & lm_pos
+            mflx_up = mflx_up.at[:, j].set(
+                jnp.where(m1, 0.0, mflx_up[:, j]))
+            entr_up = entr_up.at[:, j].set(
+                jnp.where(m1, 0.0, entr_up[:, j]))
+            detr_up = detr_up.at[:, j].set(
+                jnp.where(m1, 0.0, detr_up[:, j]))
+            h_upd = h_upd.at[:, j].set(jnp.where(m1, h_env[:, j],
+                                                 h_upd[:, j]))
+            m2 = (j == jt0) & lm_pos
+            jp1 = min(j + 1, pver - 1)  # m2 empty at j=pver-1 (jt<jb<=pver-1)
+            detr_up = detr_up.at[:, j].set(
+                jnp.where(m2, mflx_up[:, jp1] / dz[:, j], detr_up[:, j]))
+            entr_up = entr_up.at[:, j].set(
+                jnp.where(m2, 0.0, entr_up[:, j]))
+            mflx_up = mflx_up.at[:, j].set(
+                jnp.where(m2, 0.0, mflx_up[:, j]))
+
+        # LCL search with s/q recursion (bottom -> top, sequential)
+        done = jnp.zeros(n, dtype=bool)
+        for j in range(pver - 1, msg, -1):
+            mjb = (j == jb) & lm_pos
+            q_upd = q_upd.at[:, j].set(
+                jnp.where(mjb, q_mid[:, j], q_upd[:, j]))
+            s_upd = s_upd.at[:, j].set(
+                jnp.where(mjb, (h_upd[:, j]
+                                - zc["latvap"] * q_upd[:, j])
+                          / zc["cpair"], s_upd[:, j]))
+            m = (~done) & (j > jt0) & (j < jb) & lm_pos
+            mf_s = jnp.where(mflx_up[:, j] != 0.0, mflx_up[:, j], 1.0)
+            su_new = (mflx_up[:, j + 1] / mf_s * s_upd[:, j + 1]
+                      + dz[:, j] / mf_s
+                      * (entr_up[:, j] - detr_up[:, j]) * s_mid[:, j])
+            qu_new = (mflx_up[:, j + 1] / mf_s * q_upd[:, j + 1]
+                      + dz[:, j] / mf_s
+                      * (entr_up[:, j] * q_mid[:, j]
+                         - detr_up[:, j] * qst[:, j]))
+            s_upd = s_upd.at[:, j].set(jnp.where(m, su_new, s_upd[:, j]))
+            q_upd = q_upd.at[:, j].set(jnp.where(m, qu_new, q_upd[:, j]))
+            tu = s_upd[:, j] - zc["grav"] / zc["cpair"] * z_int[:, j]
+            _estu, qstu = qsat_hpa(
+                tu, (p_mid[:, j] + p_mid[:, j - 1]) / 2.0)
+            lclm = m & (q_upd[:, j] >= qstu)
+            jlcl = jnp.where(lclm, j, jlcl)
+            done = done | lclm
+
+        # wet-adiabatic s/q between the top and the LCL
+        m = ((ki > jt0[:, None]) & (ki <= jlcl[:, None])
+             & lm_pos[:, None])
+        s_upd = jnp.where(m, s_int + (h_upd - hsthat)
+                          / (zc["cpair"] * (1.0 + gamhat)), s_upd)
+        q_upd = jnp.where(m, qsthat + gamhat * (h_upd - hsthat)
+                          / (zc["latvap"] * (1.0 + gamhat)), q_upd)
+
+        # condensation rate in the updraft (with microphysics: latent
+        # heating correction and the plume extends to the LCL)
+        for j in range(pver - 1, msg, -1):
+            if zm_microp:
+                m = lm_pos & (j >= jt0) & (j <= jlcl)
+                cu_new = (((mflx_up[:, j] * s_upd[:, j]
+                            - mflx_up[:, j + 1] * s_upd[:, j + 1])
+                           / dz[:, j]
+                           - entr_up[:, j] * s_mid[:, j]
+                           + detr_up[:, j] * s_upd[:, j])
+                          / (zc["latvap"] / zc["cpair"])
+                          - zc["latice"] * tmp_frz[:, j]
+                          / zc["latvap"])
+            else:
+                m = lm_pos & (j >= jt0) & (j < jb)
+                cu_new = (((mflx_up[:, j] * s_upd[:, j]
+                            - mflx_up[:, j + 1] * s_upd[:, j + 1])
+                           / dz[:, j]
+                           - (entr_up[:, j] - detr_up[:, j])
+                           * s_mid[:, j])
+                          / (zc["latvap"] / zc["cpair"]))
+            cu_new = jnp.where(j == jt0, 0.0, cu_new)
+            cu = cu.at[:, j].set(
+                jnp.where(m, jnp.maximum(0.0, cu_new), cu[:, j]))
+
+        if zm_microp:
+            # ---- convective microphysics (Fortran 1674-1766) ----
+            tug = jnp.array(t_mid)
+            kk = jnp.arange(pver)[None, :]
+            tug = jnp.where(kk >= msg + 1,
+                            s_upd - zc["grav"] / zc["cpair"]
+                            * z_int[:, :pver], tug)
+            t_homofrz, t_mphase = 233.15, 40.0
+            tug_kp1 = tug[:, 1:]
+            fice = jnp.zeros((n, pver))
+            fice = fice.at[:, :pver - 1].set(jnp.where(
+                tug_kp1 > zc["tfreez"], 0.0,
+                jnp.where(tug_kp1 < t_homofrz, 1.0,
+                          _divs(zc["tfreez"] - tug_kp1, t_mphase))))
+            cmei = cu * fice
+            cmel = cu * (1.0 - fice)
+            mo = zm_mphy(msg, jb, jt0, jlcl, s_upd, q_upd, mflx_up,
+                         detr_up, entr_up, z_int, p_mid, t_mid, q_mid,
+                         gamhat, lambda_max, cmel, cmei, aero, deltat,
+                         zp["auto_fac"], zp["accr_fac"],
+                         zp["micro_dcs"], zc["grav"], zc["cpair"],
+                         zc["rdair"], lamc0=lamc_arr, pgam0=pgam_arr,
+                         mp=mp, ap=ap)
+            lamc_arr = mo["lamc"]
+            pgam_arr = mo["pgam"]
+            rprd = mo["rprd"]
+            tmp_frz = mo["frz"]
+            ql = mo["qc"] + mo["qi"]
+            frz_st = jnp.array(tmp_frz)
+            # iteration 2 with a lowered top: zero cu / microp frz in
+            # the band between the new and old tops (Fortran 1749-1756)
+            if itr == 2:
+                band = ((jt0 > jto)[:, None] & (kk >= jto[:, None])
+                        & (kk <= jt0[:, None]))
+                frz_st = jnp.where(band, 0.0, frz_st)
+                cu = jnp.where(band, 0.0, cu)
+            # total precip (condensation - detrained condensate)
+            for j in range(pver - 1, msg, -1):
+                m = ((j >= jt0) & (j < jb) & lm_pos
+                     & (mflx_up[:, j] >= 0.0))
+                jp1 = j + 1
+                totpcp = totpcp + jnp.where(
+                    m, dz[:, j] * (cu[:, j] - detr_up[:, j]
+                                   * (mo["qcde"][:, jp1]
+                                      + mo["qide"][:, jp1]
+                                      + mo["qnide"][:, jp1])), 0.0)
+            microp = mo
+            microp = dict(microp)
+            microp["cmel"] = cmel
+            microp["cmei"] = cmei
+        else:
+            # in-plume liquid, rain production, total precip
+            rprd = jnp.zeros((n, pver))
+            for j in range(pver - 1, msg, -1):
+                m = ((j >= jt0) & (j < jb) & lm_pos
+                     & (mflx_up[:, j] >= 0.0))
+                pos = m & (mflx_up[:, j] > 0.0)
+                mf_s = jnp.where(mflx_up[:, j] != 0.0, mflx_up[:, j], 1.0)
+                ql1 = (1.0 / mf_s
+                       * (mflx_up[:, j + 1] * ql[:, j + 1]
+                          - dz[:, j] * detr_up[:, j] * ql[:, j + 1]
+                          + dz[:, j] * cu[:, j]))
+                ql = ql.at[:, j].set(
+                    jnp.where(pos, ql1 / (1.0 + dz[:, j] * c0mask),
+                              jnp.where(m, 0.0, ql[:, j])))
+                totpcp = totpcp + jnp.where(
+                    m, dz[:, j] * (cu[:, j] - detr_up[:, j] * ql[:, j + 1]),
+                    0.0)
+                rprd = rprd.at[:, j].set(
+                    jnp.where(m, c0mask * mflx_up[:, j] * ql[:, j],
+                              rprd[:, j]))
 
     (jt0, jd, mflx_dn, entr_dn, s_dnd, q_dnd, h_dnd, q_dnd_sat, evp,
      totevp) = zm_downdraft_properties(
@@ -619,22 +757,78 @@ def zm_cloud_properties(p_mid, z_mid, z_int, t_mid, s_mid, s_int,
                         entr_dn)
     evp = jnp.where(m, jnp.where(posm[:, None],
                                  evp * fac[:, None], 0.0), evp)
+    if zm_microp:
+        # rain evaporated in the downdraft removes snow/freezing
+        # proportionally (Fortran 1823-1828); uses rprd BEFORE the
+        # evp subtraction
+        sprd = microp["sprd"]
+        mrp = (ki >= msg + 1) & (rprd > 0.0)
+        adj = evp * jnp.minimum(
+            1.0, sprd / jnp.where(mrp, rprd, 1.0))
+        frz_st = jnp.where(mrp, frz_st - adj, frz_st)
+        sprd = jnp.where(mrp, sprd - adj, sprd)
+        microp["sprd"] = sprd
     rprd = rprd.at[:, msg + 1:].set(rprd[:, msg + 1:]
                                     - evp[:, msg + 1:])
 
     # net precipitation flux across interfaces
     pflx = jnp.zeros((n, pver + 1))
+    pflxs = jnp.zeros((n, pver + 1))
     for j in range(1, pver + 1):
         pflx = pflx.at[:, j].set(pflx[:, j - 1]
                                  + rprd[:, j - 1] * dz[:, j - 1])
+        if zm_microp:
+            pflxs = pflxs.at[:, j].set(
+                pflxs[:, j - 1] + microp["sprd"][:, j - 1]
+                * dz[:, j - 1])
 
     mflx_net = mflx_up + mflx_dn
 
-    return dict(jt=jt0, jlcl=jlcl, j0=j0, jd=jd, mflx_up=mflx_up,
-                entr_up=entr_up, detr_up=detr_up, mflx_dn=mflx_dn,
-                entr_dn=entr_dn, mflx_net=mflx_net, s_upd=s_upd,
-                q_upd=q_upd, ql=ql, s_dnd=s_dnd, q_dnd=q_dnd,
-                qst=qst, cu=cu, evp=evp, pflx=pflx, rprd=rprd, dz=dz)
+    if zm_microp:
+        # protect against snow flux exceeding total precip flux
+        # (Fortran 1850-1863): remove the excess from sprd/frz,
+        # sweeping bottom -> top
+        sprd = microp["sprd"]
+        excess = pflxs[:, pver] > pflx[:, pver]
+        dum = jnp.where(excess,
+                        _divs(pflxs[:, pver] - pflx[:, pver], OMSM),
+                        0.0)
+        for j in range(pver - 1, msg, -1):
+            mfix = (sprd[:, j] > 0.0) & (dum > 0.0)
+            sdum = jnp.minimum(sprd[:, j], dum / dz[:, j])
+            sprd = sprd.at[:, j].set(
+                jnp.where(mfix, sprd[:, j] - sdum, sprd[:, j]))
+            frz_st = frz_st.at[:, j].set(
+                jnp.where(mfix, frz_st[:, j] - sdum, frz_st[:, j]))
+            dum = jnp.where(mfix, dum - sdum * dz[:, j], dum)
+        microp["sprd"] = sprd
+
+        # disable columns whose top is at or below the LCL
+        # (Fortran 1864-1881), incl. zm_microp_st_zero
+        dead = jt0 >= jlcl
+        dm = dead[:, None]
+        mflx_up = jnp.where(dm, 0.0, mflx_up)
+        entr_up = jnp.where(dm, 0.0, entr_up)
+        detr_up = jnp.where(dm, 0.0, detr_up)
+        ql = jnp.where(dm, 0.0, ql)
+        cu = jnp.where(dm, 0.0, cu)
+        evp = jnp.where(dm, 0.0, evp)
+        mflx_dn = jnp.where(dm, 0.0, mflx_dn)
+        entr_dn = jnp.where(dm, 0.0, entr_dn)
+        mflx_net = jnp.where(dm, 0.0, mflx_net)
+        rprd = jnp.where(dm, 0.0, rprd)
+        frz_st = jnp.where(dm, 0.0, frz_st)
+        microp = {k: jnp.where(dm, 0.0, v) for k, v in microp.items()}
+
+    out = dict(jt=jt0, jlcl=jlcl, j0=j0, jd=jd, mflx_up=mflx_up,
+               entr_up=entr_up, detr_up=detr_up, mflx_dn=mflx_dn,
+               entr_dn=entr_dn, mflx_net=mflx_net, s_upd=s_upd,
+               q_upd=q_upd, ql=ql, s_dnd=s_dnd, q_dnd=q_dnd,
+               qst=qst, cu=cu, evp=evp, pflx=pflx, rprd=rprd, dz=dz)
+    if zm_microp:
+        out["microp"] = microp
+        out["frz"] = frz_st
+    return out
 
 
 def zm_closure(lcl, lel, jt0, mx, dsubcld, z_int, p_mid, p_del, t_mid,
@@ -760,13 +954,20 @@ def zm_closure(lcl, lel, jt0, mx, dsubcld, z_int, p_mid, p_del, t_mid,
                      jnp.maximum(dltaa / zp["tau"]
                                  / jnp.where(dadt != 0.0, dadt, 1.0),
                                  0.0), 0.0)
+    if zp.get("zm_microp", False):
+        # no convection for plumes less than 2 layers deep
+        cbmf = jnp.where((mx - jt0) < 2, 0.0, cbmf)
     return cbmf
 
 
 def zm_calc_output_tend(jt0, mx, dsubcld, p_del, s_int, q_int, s_upd,
                         q_upd, mflx_up, detr_up, mflx_dn, s_dnd,
-                        q_dnd, ql, evp, cu, msg, zc):
-    """Final dsdt/dqdt/dl tendencies (zm_microp=False branch)."""
+                        q_dnd, ql, evp, cu, msg, zc, microp=None,
+                        frz=None):
+    """Final dsdt/dqdt/dl tendencies. With microp (dict of gathered
+    zm_mphy state) the freezing heating enters dsdt and dl comes from
+    the detrained microphysical condensate; also returns the
+    detrainment tendencies (dif, dnlf, dnif, dsf, dnsf)."""
     n, pver = p_del.shape
     ki = jnp.arange(pver)[None, :]
     lat_cp = zc["latvap"] / zc["cpair"]
@@ -796,7 +997,26 @@ def zm_calc_output_tend(jt0, mx, dsubcld, p_del, s_int, q_int, s_upd,
            + mflx_dn[:, kp] * (q_dnd[:, kp] - q_int[:, kp])
            - mflx_dn[:, kv] * (q_dnd[:, kv] - q_int[:, kv]))
         / p_del[:, kv])
-    dl = dl.at[:, kv].set(detr_up[:, kv] * ql[:, kp])
+    if microp is not None:
+        dsdt = dsdt.at[:, kv].set(
+            dsdt[:, kv] + zc["latice"] / zc["cpair"] * frz[:, kv])
+        dif = jnp.zeros((n, pver))
+        dnlf = jnp.zeros((n, pver))
+        dnif = jnp.zeros((n, pver))
+        dsf = jnp.zeros((n, pver))
+        dnsf = jnp.zeros((n, pver))
+        dif = dif.at[:, kv].set(detr_up[:, kv] * microp["qide"][:, kp])
+        dnlf = dnlf.at[:, kv].set(detr_up[:, kv]
+                                  * microp["ncde"][:, kp])
+        dnif = dnif.at[:, kv].set(detr_up[:, kv]
+                                  * microp["nide"][:, kp])
+        dsf = dsf.at[:, kv].set(detr_up[:, kv]
+                                * microp["qnide"][:, kp])
+        dnsf = dnsf.at[:, kv].set(detr_up[:, kv]
+                                  * microp["nsde"][:, kp])
+        dl = dl.at[:, kv].set(detr_up[:, kv] * microp["qcde"][:, kp])
+    else:
+        dl = dl.at[:, kv].set(detr_up[:, kv] * ql[:, kp])
 
     # at and below cloud base (sequential: k > mx copies k-1)
     for j in range(kbm0, pver):
@@ -816,13 +1036,23 @@ def zm_calc_output_tend(jt0, mx, dsubcld, p_del, s_int, q_int, s_upd,
                                            dsdt[:, j]))
         dqdt = dqdt.at[:, j].set(jnp.where(mgt, dqdt[:, j - 1],
                                            dqdt[:, j]))
+    if microp is not None:
+        return dsdt, dqdt, dl, dif, dnlf, dnif, dsf, dnsf
     return dsdt, dqdt, dl
 
 
 def zm_conv_main(t_mid, q_mid_in, omega, p_mid_in, p_int_in, p_del_in,
                  geos, z_mid_in, z_int_in, pbl_hgt, tpert, landfrac,
-                 t_star, q_star, time_step, is_first_step, zc, zp):
-    """ZM deep convection main routine (zm_microp=False). Inputs are
+                 t_star, q_star, time_step, is_first_step, zc, zp,
+                 aero=None):
+    """ZM deep convection main routine. With zp['zm_microp'] (the
+    EAMv3 default) the convective microphysics path runs: aero must be
+    the modal-aerosol dict with UNGATHERED per-column arrays under
+    keys num (ncol,pver,nmodes), mmr (ncol,pver,nspecmx,nmodes),
+    dgnum (ncol,pver,nmodes) plus the mode/species config of
+    eam_jax.zm_microphysics.zm_mphy; the returned dict then also
+    carries 'microp' (dict of column-scattered zm_microp_st fields)
+    and 'rice'. Inputs are
     (ncol, pver)/(ncol, pver+1) C-ordered arrays, level 0 = top;
     pressures in Pa, z relative to the surface [m], geos [m2/s2].
     Returns a dict of all zm_conv_main outputs (0-based indices;
@@ -901,6 +1131,16 @@ def zm_conv_main(t_mid, q_mid_in, omega, p_mid_in, p_int_in, p_del_in,
         cld_base_mass_flux=jnp.zeros(ncol))
     out["gather_index"][:lengath] = gidx
     if lengath == 0:
+        if zp.get("zm_microp", False):
+            # zm_microp_st_ini leaves the scattered state all-zero
+            out["microp"] = {
+                nm: jnp.zeros((ncol, pver)) for nm in
+                ["wu", "qc", "qi", "qr", "qni", "qg", "nc", "ni",
+                 "nr", "ns", "ng", "sprd", "pgam", "lamc", "qcde",
+                 "qide", "qnide", "ncde", "nide", "nsde", "dif",
+                 "dsf", "dnlf", "dnif", "dnsf", "frz", "cmel",
+                 "cmei"]}
+            out["rice"] = jnp.zeros(ncol)
         return out
 
     # ---- gathered arrays ----
@@ -934,9 +1174,20 @@ def zm_conv_main(t_mid, q_mid_in, omega, p_mid_in, p_int_in, p_del_in,
     s_int_g = _interface_interp(s_mid_g, msg)
     q_int_g = _interface_interp(q_mid_g, msg)
 
+    zm_microp = bool(zp.get("zm_microp", False))
+    aero_g = None
+    if zm_microp:
+        aero_g = dict(aero)
+        aero_g["numg"] = jnp.asarray(aero["num"],
+                                     dtype=jnp.float64)[g]
+        aero_g["mmrg"] = jnp.asarray(aero["mmr"],
+                                     dtype=jnp.float64)[g]
+        aero_g["dgnumg"] = jnp.asarray(aero["dgnum"],
+                                       dtype=jnp.float64)[g]
     cp = zm_cloud_properties(p_mid_g, z_mid_g, z_int_g, t_mid_g,
                              s_mid_g, s_int_g, q_mid_g, landfrac_g,
-                             tpert_g, mx_g, lel_g, msg, zc, zp)
+                             tpert_g, mx_g, lel_g, msg, zc, zp,
+                             aero=aero_g, deltat=float(time_step))
     jt_g = cp["jt"]
     dz = cp["dz"]
     mflx_up = cp["mflx_up"]
@@ -960,6 +1211,11 @@ def zm_conv_main(t_mid, q_mid_in, omega, p_mid_in, p_int_in, p_del_in,
     cu_g = jnp.where(keep, cu_g, cu_g * conv)
     rprd_g = jnp.where(keep, rprd_g, rprd_g * conv)
     evp_g = jnp.where(keep, evp_g, evp_g * conv)
+    if zm_microp:
+        microp_g = dict(cp["microp"])
+        frz_g = jnp.where(keep, cp["frz"], cp["frz"] * conv)
+        sprd_g = jnp.where(keep, microp_g["sprd"],
+                           microp_g["sprd"] * conv)
 
     # CAPE closure -> cloud-base mass flux
     cbmf = zm_closure(lcl_g, lel_g, jt_g, mx_g, dsubcld, z_int_g,
@@ -992,6 +1248,17 @@ def zm_conv_main(t_mid, q_mid_in, omega, p_mid_in, p_int_in, p_del_in,
     # scale by the cloud-base mass flux
     sc = cbmf[:, None]
     m = ki >= msg
+    if zm_microp:
+        # zero out micro data for inactive columns
+        # (zm_microp_st_zero), then scale sprd/frz
+        dead = (cbmf == 0.0)[:, None]
+        microp_g = {k: jnp.where(dead, 0.0, v)
+                    for k, v in microp_g.items()}
+        frz_g = jnp.where(dead, 0.0, frz_g)
+        sprd_g = jnp.where(dead, 0.0, sprd_g)
+        sprd_g = jnp.where(m, sprd_g * sc, sprd_g)
+        frz_g = jnp.where(m, frz_g * sc, frz_g)
+        ql_g = jnp.where(dead & m, 0.0, ql_g)
     mflx_up = jnp.where(m, mflx_up * sc, mflx_up)
     mflx_dn = jnp.where(m, mflx_dn * sc, mflx_dn)
     mflx_net = jnp.where(m, mflx_net * sc, mflx_net)
@@ -1005,11 +1272,25 @@ def zm_conv_main(t_mid, q_mid_in, omega, p_mid_in, p_int_in, p_del_in,
     pflx_g = jnp.where((kint >= msg + 1) & (kint <= pver),
                        pflx_g * sc * 100.0 / zc["grav"], pflx_g)
 
-    # output tendencies
-    dsdt, dqdt, dl_g = zm_calc_output_tend(
-        jt_g, mx_g, dsubcld, p_del_g, s_int_g, q_int_g, cp["s_upd"],
-        cp["q_upd"], mflx_up, detr_up, mflx_dn, cp["s_dnd"],
-        cp["q_dnd"], ql_g, evp_g, cu_g, msg, zc)
+    # output tendencies (+ microphysics detrainment tendencies and
+    # the negative-water conservation adjustment)
+    if zm_microp:
+        (dsdt, dqdt, dl_g, dif_g, dnlf_g, dnif_g, dsf_g,
+         dnsf_g) = zm_calc_output_tend(
+            jt_g, mx_g, dsubcld, p_del_g, s_int_g, q_int_g,
+            cp["s_upd"], cp["q_upd"], mflx_up, detr_up, mflx_dn,
+            cp["s_dnd"], cp["q_dnd"], ql_g, evp_g, cu_g, msg, zc,
+            microp=microp_g, frz=frz_g)
+        (dl_g, dsdt, dqdt, rprd_g, sprd_g, dnlf_g, dif_g, dnif_g,
+         dsf_g, dnsf_g) = zm_microphysics_adjust(
+            jt_g, msg, float(time_step), p_del_g, q_mid_g, dl_g,
+            dsdt, dqdt, rprd_g, sprd_g, dnlf_g, dif_g, dnif_g,
+            dsf_g, dnsf_g, zc)
+    else:
+        dsdt, dqdt, dl_g = zm_calc_output_tend(
+            jt_g, mx_g, dsubcld, p_del_g, s_int_g, q_int_g,
+            cp["s_upd"], cp["q_upd"], mflx_up, detr_up, mflx_dn,
+            cp["s_dnd"], cp["q_dnd"], ql_g, evp_g, cu_g, msg, zc)
 
     # ---- scatter ----
     gr = jnp.asarray(g)
@@ -1029,21 +1310,53 @@ def zm_conv_main(t_mid, q_mid_in, omega, p_mid_in, p_int_in, p_del_in,
     jctop = out["jctop"].at[gr].set(jt_g)
     jcbot = out["jcbot"].at[gr].set(mx_g)
 
+    # scatter the microphysics state/tendencies (zm_microp_st_scatter:
+    # ungathered columns keep the zm_microp_st_ini zeros)
+    microp_out = None
+    rice = None
+    if zm_microp:
+        microp_g["sprd"] = sprd_g
+        microp_g["frz"] = frz_g
+        microp_g["dif"] = dif_g
+        microp_g["dsf"] = dsf_g
+        microp_g["dnlf"] = dnlf_g
+        microp_g["dnif"] = dnif_g
+        microp_g["dnsf"] = dnsf_g
+        microp_out = {k: jnp.zeros((ncol, pver)).at[gr].set(v)
+                      for k, v in microp_g.items()}
+
     # precip from the change in water vapor minus detrained liquid
     # (all columns; descending-k accumulation order preserved)
     dq_full = jnp.zeros((ncol, pver)).at[gr].set(
         jnp.where(mk, q_mid_new - q_mid_in[g], 0.0))
     prec = jnp.zeros(ncol)
     for j in range(pver - 1, msg - 1, -1):
-        prec = prec - p_del_in[:, j] * dq_full[:, j] \
-            - p_del_in[:, j] * dlf[:, j] * time_step
+        if zm_microp:
+            prec = prec - p_del_in[:, j] * dq_full[:, j] \
+                - p_del_in[:, j] * (dlf[:, j] + microp_out["dif"][:, j]
+                                    + microp_out["dsf"][:, j]) \
+                * time_step
+        else:
+            prec = prec - p_del_in[:, j] * dq_full[:, j] \
+                - p_del_in[:, j] * dlf[:, j] * time_step
     prec = (1.0 / zc["grav"]) * jnp.maximum(prec, 0.0) \
         / time_step / 1000.0
 
-    # reserved liquid (ascending-k accumulation order preserved)
+    # reserved liquid/ice (ascending-k accumulation order preserved)
     rliq = jnp.zeros(ncol)
-    for j in range(pver):
-        rliq = rliq + dlf[:, j] * p_del_in[:, j] / zc["grav"]
+    if zm_microp:
+        rice = jnp.zeros(ncol)
+        for j in range(pver):
+            rliq = rliq + (dlf[:, j] + microp_out["dif"][:, j]
+                           + microp_out["dsf"][:, j]) \
+                * p_del_in[:, j] / zc["grav"]
+            rice = rice + (microp_out["dif"][:, j]
+                           + microp_out["dsf"][:, j]) \
+                * p_del_in[:, j] / zc["grav"]
+        rice = rice / 1000.0
+    else:
+        for j in range(pver):
+            rliq = rliq + dlf[:, j] * p_del_in[:, j] / zc["grav"]
     rliq = rliq / 1000.0
 
     # gathered-layout outputs (rows >= lengath keep the fill values)
@@ -1063,6 +1376,9 @@ def zm_conv_main(t_mid, q_mid_in, omega, p_mid_in, p_int_in, p_del_in,
     out.update(jctop=jctop, jcbot=jcbot, prec=prec, heat=heat,
                qtnd=qtnd, mcon=mcon, pflx=pflx, zdu=zdu, rliq=rliq,
                rprd=rprd, dlf=dlf)
+    if zm_microp:
+        out["microp"] = microp_out
+        out["rice"] = rice
     return out
 
 
