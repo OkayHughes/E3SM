@@ -61,9 +61,32 @@ see build_clubb.py) exactly as EAM does and records golden archives:
                                 and the nu2/nu9_vert_res_dep profiles
                                 + model-flag configuration.
 
+  golden/clubb_lscale.npz       (slice D) the Lscale/tau
+                                infrastructure: the REAL public
+                                compute_mixing_length (parcel Lscale,
+                                40 columns: physically consistent +
+                                stable/unstable/saturated/bitwise-
+                                uniform-dCAPE/near-zero-TKE/mu-sweep
+                                stress families), the REAL
+                                calc_brunt_vaisala_freq_sqd (all three
+                                formula variants via flag toggling),
+                                calc_stability_correction,
+                                term_wp2_splat/term_wp3_splat (C=0
+                                EAMv3 + nonzero clip sweep),
+                                calc_surface_varnce (surface-flux
+                                sign/magnitude sweeps incl. both
+                                splat-correction arms), and the full
+                                drv_lscale_tau_segment (a verbatim
+                                transcription of advance_clubb_core's
+                                inline em->thvm->Lscale->tau->Kh->
+                                splat->surface->tau_N2 segment,
+                                validated BITWISE against the real
+                                advance_clubb_core khzm/khzt
+                                diagnostics at generation).
+
 Run `python3 gen_clubb_golden.py [archive ...]` with archive names
-(grid/tridag/sat/pdf_closure/pdf_driver/xp2) to regenerate a subset;
-no arguments regenerates everything.
+(grid/tridag/sat/pdf_closure/pdf_driver/xp2/lscale) to regenerate a
+subset; no arguments regenerates everything.
 
 EAMv3 tunable parameters: CLUBB compiled-in defaults from the real
 read_parameters(-99) with the namelist_defaults_eam.xml phys="default"
@@ -1037,10 +1060,481 @@ def gen_xp2(params, idx):
     return out
 
 
+# ---------------------------------------------------------------------------
+# Slice D: Lscale/tau infrastructure
+# ---------------------------------------------------------------------------
+
+LSCALE_IDX_NAMES = ["c_K", "taumin", "taumax", "Lscale_mu_coef",
+                    "Lscale_pert_coef", "lmin_coef", "C_wp2_splat",
+                    "lambda0_stability_coef", "up2_vp2_factor"]
+
+# drv_lscale_tau_segment per-column array inputs, in signature order
+SEG_IN = ["thlm", "rtm", "rcm", "wp2", "wp3", "up2", "vp2", "um", "vm",
+          "p", "exner", "thv_ds_zt"]
+SEG_SLOTS = ["em", "thvm", "sqrt_em_zt", "lscale", "lscale_up",
+             "lscale_down", "tau_zt", "tau_zm", "kh_zt", "kh_zm",
+             "wp2_splat", "wp3_splat", "stability_correction",
+             "tau_n2_zm"]
+SFC_SLOTS = ["wp2", "up2", "vp2", "thlp2", "rtp2", "rtpthlp"]
+
+ML_IN = ["thvm", "thlm", "rtm", "em", "p", "exner", "thv_ds"]
+BV_IN = ["thlm", "exner", "rtm", "rcm", "p", "thvm"]
+
+HOST_DXY = 100000.0
+MU_EAMV3 = 0.0005
+
+# surface-flux sweep for the segment cases (wpthlp, wprtp, upwp, vpwp):
+# stable/unstable, moisture-flux signs, near-zero and strong stress
+SEG_SFC_FLUXES = [
+    (0.02, 5e-5, -0.05, 0.02),     # weakly convective (slice B/C values)
+    (-0.05, -2e-5, -0.02, 0.01),   # stable BL, downward moisture
+    (0.3, 8e-4, -0.4, 0.3),        # strongly convective, strong stress
+    (-0.3, 2e-4, 0.15, -0.2),      # strongly stable, opposing stress
+    (1e-13, 1e-14, 1e-8, -1e-8),   # near-zero everything (ufmin floor)
+    (0.0, 0.0, 0.0, 0.0),          # exactly zero
+    (0.08, -5e-5, -0.6, -0.5),     # convective, drying, strong shear
+    (-0.02, 6e-4, 0.0, 0.0),       # zero stress, mixed scalar fluxes
+]
+
+
+def _advance_entry(cols, c, nz, z_t, z_m, fluxes, sfc_elevation=0.0):
+    """Run drv_advance_clubb_core one EAMv3 step from synthetic column
+    c (the slice-B pattern); returns (entry_state_dict, prog_out,
+    diag)."""
+    ned = 29
+    zero = np.zeros(nz)
+    p = cols["p"][c]
+    exner = cols["exner"][c]
+    T = cols["thlm"][c] * exner
+    rho_t = p / (287.042 * T)
+    rho_ds_zt = rho_t.copy()
+    rho_ds_zt[0] = rho_ds_zt[1]
+    rho_ds_zm = _interp_zm(z_m, z_t, rho_ds_zt)
+    prog_in = np.column_stack(
+        [cols["um"][c], cols["vm"][c], cols["upwp"][c],
+         cols["vpwp"][c], cols["up2"][c], cols["vp2"][c],
+         cols["thlm"][c], cols["rtm"][c], cols["wprtp"][c],
+         cols["wpthlp"][c], cols["wp2"][c], cols["wp3"][c],
+         cols["rtp2"][c], cols["rtp3"][c], cols["thlp2"][c],
+         cols["thlp3"][c], cols["rtpthlp"][c]] + [np.zeros(nz)] * 6)
+    edsclr_in = np.zeros((nz, ned))
+    for jj in range(ned):
+        edsclr_in[:, jj] = (1.0 + 0.1 * jj) * np.exp(
+            -z_t / (2000.0 + 300.0 * jj))
+    edsclr_in[0, :] = edsclr_in[1, :]
+    wpthlp_s, wprtp_s, upwp_s, vpwp_s = fluxes
+    prog_out, _eds, diag, _pz, _pm, aerr = d.drv_advance_clubb_core(
+        DT_EAMV3, 1.0e-4, sfc_elevation, wpthlp_s, wprtp_s, upwp_s,
+        vpwp_s, HOST_DXY, HOST_DXY,
+        zero, zero, zero, zero, zero, zero, zero, zero, zero,
+        cols["wm_zm"][c], cols["wm_zt"][c], p, rho_ds_zm, rho_t,
+        exner, rho_ds_zm, rho_ds_zt, 1.0 / rho_ds_zm,
+        1.0 / rho_ds_zt, cols["thv_ds_zm"][c], cols["thv_ds_zt"][c],
+        cols["rfrzm"][c], zero, prog_in, edsclr_in)
+    assert aerr == 0, (c, aerr)
+    return prog_in, prog_out, diag, dict(
+        p=p, exner=exner, rho_ds_zm=rho_ds_zm, rho_ds_zt=rho_ds_zt,
+        rho_t=rho_t, edsclr_in=edsclr_in)
+
+
+def _seg_case_from_state(cols, c, st):
+    """Assemble drv_lscale_tau_segment inputs from a prognostic state
+    dict (thlm/rtm/rcm/wp2/wp3/up2/vp2/um/vm) + column environment."""
+    return {"thlm": st["thlm"], "rtm": st["rtm"], "rcm": st["rcm"],
+            "wp2": st["wp2"], "wp3": st["wp3"], "up2": st["up2"],
+            "vp2": st["vp2"], "um": st["um"], "vm": st["vm"],
+            "p": cols["p"][c], "exner": cols["exner"][c],
+            "thv_ds_zt": cols["thv_ds_zt"][c]}
+
+
+def gen_lscale(params, idx):
+    zi, zt = eam_like_grid(73)
+    nz = zi.size
+    err = d.drv_setup(29, params, zi, zt)
+    assert err == 0
+    d.drv_set_eam_flags(2, True)
+    d.drv_set_bv_flags(False, False)      # EAMv3 defaults
+
+    lmin, t0, iflags = d.drv_lscale_config()
+    # EAMv3 model_flags configuration (drv_lscale_config slots):
+    # l_stability_correct_tau_zm=T, l_diag_Lscale_from_tau=F,
+    # l_use_C7_Richardson=F, l_use_C11_Richardson=F, l_use_wp3_pr3=F
+    # (=> Cx_fnc_Richardson = 0, dead), l_Lscale_plume_centered=F,
+    # l_use_ice_latent=F, l_brunt_vaisala_freq_moist=F,
+    # l_use_thvm_in_bv_freq=F, l_sat_mixrat_lookup=F, l_tke_aniso=T.
+    assert list(iflags) == [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], list(iflags)
+    assert lmin == 4.0 and t0 == 300.0, (lmin, t0)
+    lidx = {n: int(i) - 1 for n, i in
+            zip(LSCALE_IDX_NAMES, d.drv_param_indices_lscale())}
+    assert params[lidx["C_wp2_splat"]] == 0.0    # EAMv3 (no override)
+    assert params[lidx["c_K"]] == 0.2
+
+    rng = np.random.default_rng(20260714)
+    cols = _build_driver_columns(nz, zt, zi, rng)
+    z_t = np.maximum(zt, 0.0)
+    z_m = np.maximum(zi, 0.0)
+
+    out = {"zi": zi, "zt": zt, "dt": np.array(DT_EAMV3),
+           "lmin": np.array(lmin), "T0": np.array(t0),
+           "lscale_flags": np.asarray(iflags),
+           "host_dxy": np.array(HOST_DXY)}
+
+    # ---- SEG: the advance_clubb_core Lscale/tau segment -------------
+    # 16 entry states (rcm=0) + 8 one-step-advanced states (real rcm
+    # etc.) + 1 elevated-surface case (else branch).  Validated at
+    # generation: kh_zt/kh_zm from the transcription must match the
+    # khzt/khzm diagnostics of the REAL advance_clubb_core BITWISE on
+    # the same entry state.
+    nseg = 25
+    seg_ins = {k: np.zeros((nseg, nz)) for k in SEG_IN}
+    seg_fluxes = np.zeros((nseg, 4))
+    seg_elev = np.zeros(nseg)
+    seg_outs = np.zeros((nseg, nz, len(SEG_SLOTS)))
+    sfc_outs = np.zeros((nseg, len(SFC_SLOTS)))
+    for j in range(nseg):
+        c = j % 16
+        fluxes = SEG_SFC_FLUXES[j % len(SEG_SFC_FLUXES)]
+        elev = 250.0 if j == 24 else 0.0
+        prog_in, prog_out, diag, env = _advance_entry(
+            cols, c, nz, z_t, z_m, fluxes, sfc_elevation=elev)
+        if 16 <= j < 24:
+            # advanced state (realistic covariances + non-zero rcm)
+            st = dict(um=prog_out[:, 0], vm=prog_out[:, 1],
+                      up2=prog_out[:, 4], vp2=prog_out[:, 5],
+                      thlm=prog_out[:, 6], rtm=prog_out[:, 7],
+                      wp2=prog_out[:, 10], wp3=prog_out[:, 11],
+                      rcm=prog_out[:, 17])
+        else:
+            st = dict(um=prog_in[:, 0], vm=prog_in[:, 1],
+                      up2=prog_in[:, 4], vp2=prog_in[:, 5],
+                      thlm=prog_in[:, 6], rtm=prog_in[:, 7],
+                      wp2=prog_in[:, 10], wp3=prog_in[:, 11],
+                      rcm=prog_in[:, 17])
+        case = _seg_case_from_state(cols, c, st)
+        seg, sfc, serr = d.drv_lscale_tau_segment(
+            DT_EAMV3, elev, HOST_DXY, HOST_DXY, *fluxes,
+            *[case[k] for k in SEG_IN])
+        assert serr == 0, (j, serr)
+
+        # END-TO-END VALIDATION of the transcription: run the REAL
+        # advance_clubb_core from this exact state; its khzt/khzm
+        # diagnostics are assigned straight from the segment's
+        # Kh_zt/Kh_zm before any prognostic advance.
+        if 16 <= j < 24:
+            prog_in2 = prog_in.copy()
+            for slot, key in [(0, "um"), (1, "vm"), (4, "up2"),
+                              (5, "vp2"), (6, "thlm"), (7, "rtm"),
+                              (10, "wp2"), (11, "wp3"), (17, "rcm")]:
+                prog_in2[:, slot] = st[key]
+            for slot, col in [(2, 2), (3, 3), (8, 8), (9, 9), (12, 12),
+                              (13, 13), (14, 14), (15, 15), (16, 16)]:
+                prog_in2[:, slot] = prog_out[:, col]
+            zero = np.zeros(nz)
+            _po, _e, diag2, _z, _m2, aerr = d.drv_advance_clubb_core(
+                DT_EAMV3, 1.0e-4, elev, *fluxes, HOST_DXY, HOST_DXY,
+                zero, zero, zero, zero, zero, zero, zero, zero, zero,
+                cols["wm_zm"][c], cols["wm_zt"][c], env["p"],
+                env["rho_ds_zm"], env["rho_t"], env["exner"],
+                env["rho_ds_zm"], env["rho_ds_zt"],
+                1.0 / env["rho_ds_zm"], 1.0 / env["rho_ds_zt"],
+                cols["thv_ds_zm"][c], cols["thv_ds_zt"][c],
+                cols["rfrzm"][c], zero, prog_in2, env["edsclr_in"])
+            assert aerr == 0, (j, aerr)
+            diag = diag2
+        assert np.array_equal(seg[:, 9], diag[:, 0]), j   # kh_zm
+        assert np.array_equal(seg[:, 8], diag[:, 1]), j   # kh_zt
+
+        for k in SEG_IN:
+            seg_ins[k][j] = case[k]
+        seg_fluxes[j] = fluxes
+        seg_elev[j] = elev
+        seg_outs[j] = seg
+        sfc_outs[j] = sfc
+    print(f"lscale segment transcription validated bitwise (kh_zm/"
+          f"kh_zt) against advance_clubb_core on {nseg} cases")
+    # the elevated-surface case must hit the else branch (tolerances)
+    assert sfc_outs[24, 3] == THL_TOL ** 2 and sfc_outs[24, 5] == 0.0
+
+    out.update({f"seg_in_{k}": v for k, v in seg_ins.items()})
+    out.update(seg_fluxes=seg_fluxes, seg_sfc_elevation=seg_elev,
+               seg_outs=seg_outs, seg_sfc_outs=sfc_outs)
+
+    # ---- ML: compute_mixing_length direct kernel sweeps -------------
+    nml = 40
+    ml_ins = {k: np.zeros((nml, nz)) for k in ML_IN}
+    ml_mu = np.zeros(nml)
+    ml_lmax = np.zeros(nml)
+    ml_outs = {k: np.zeros((nml, nz)) for k in
+               ["lscale", "lscale_up", "lscale_down"]}
+    for c in range(nml):
+        fam = c % 8
+        mu = MU_EAMV3
+        lmax = 0.25 * HOST_DXY
+        if fam == 0:
+            # physically consistent: the segment's own thvm/em
+            j = c // 8 * 3 % 25
+            thvm = seg_outs[j, :, 1]
+            em = seg_outs[j, :, 0]
+            thlm = seg_ins["thlm"][j]
+            rtm = seg_ins["rtm"][j]
+            p = seg_ins["p"][j]
+            exner = seg_ins["exner"][j]
+            thv_ds = seg_ins["thv_ds_zt"][j]
+        else:
+            h = rng.uniform(7000.0, 8500.0)
+            p = 1.0e5 * np.exp(-z_t / h)
+            p[0] = p[1]
+            exner = (p / 1.0e5) ** (287.042 / 1004.64)
+            zpbl = rng.uniform(600.0, 2200.0)
+            bl_m = np.exp(-z_m / zpbl)
+            if fam == 1:
+                # strongly stable BL: sharp inversion, weak TKE ->
+                # early parcel exhaustion (quadratic branches)
+                T = 285.0 + 0.008 * z_t - 0.004 * np.maximum(
+                    z_t - 3000.0, 0.0)
+                thlm = T / exner
+                rtm = np.full(nz, rng.uniform(1e-4, 2e-3))
+                em = rng.uniform(0.005, 0.05) * bl_m + 6.0e-4
+            elif fam == 2:
+                # strongly unstable: superadiabatic thvm, huge TKE ->
+                # parcels run far; a small host-grid Lscale_max
+                # (host_dx = 8 km) makes the cap branch fire
+                T = rng.uniform(295.0, 305.0) - 0.0099 * z_t
+                thlm = np.maximum(T, 210.0) / exner
+                thlm = np.minimum.accumulate(thlm + 1e-3 * z_t) \
+                    - 1e-3 * z_t  # gently decreasing theta aloft
+                rtm = np.full(nz, 1e-3)
+                em = rng.uniform(1.0, 3.0) * np.ones(nz)
+                lmax = 2000.0
+            elif fam == 3:
+                # saturated band -> rc_par > 0 latent-heating branch
+                T = np.maximum(rng.uniform(285.0, 295.0)
+                               - 0.0055 * z_t, 210.0)
+                thlm = T / exner
+                rsl, _ = d.drv_sat(p, T)
+                rtm = 0.6 * rsl
+                band = (z_t > 500.0) & (z_t < 4000.0)
+                rtm[band] = 1.05 * rsl[band]
+                em = rng.uniform(0.2, 0.8) * bl_m + 1e-3
+            elif fam == 4:
+                # bitwise-uniform dCAPE column: uniform thlm/rtm/
+                # thv_ds and constant thvm => dCAPE_dz_j is IDENTICAL
+                # at every level, covering the equal-dCAPE special
+                # branch in both directions (sign of delta picks
+                # up/down exhaustion)
+                thlm = np.full(nz, 290.0)
+                rtm = np.full(nz, 2e-3)
+                delta = (0.05 if c % 16 < 8 else -0.05) \
+                    * rng.uniform(0.5, 2.0)
+                thv_ds = np.full(nz, 290.0)
+                thvm = thlm + 0.61 * thv_ds * rtm + delta
+                em = np.full(nz, rng.uniform(0.02, 0.3))
+                for k, v in [("thvm", thvm), ("thlm", thlm),
+                             ("rtm", rtm), ("em", em), ("p", p),
+                             ("exner", exner), ("thv_ds", thv_ds)]:
+                    ml_ins[k][c] = v
+                ml_mu[c] = mu
+                ml_lmax[c] = lmax
+                ls, lu, ld, e = d.drv_compute_mixing_length(
+                    thvm, thlm, rtm, em, lmax, mu, p, exner, thv_ds)
+                assert e == 0, c
+                ml_outs["lscale"][c] = ls
+                ml_outs["lscale_up"][c] = lu
+                ml_outs["lscale_down"][c] = ld
+                continue
+            elif fam == 5:
+                # near-zero TKE everywhere: first-level exhaustion
+                T = 288.0 + 0.006 * z_t
+                thlm = T / exner
+                rtm = np.full(nz, 5e-4)
+                em = np.full(nz, rng.uniform(1e-4, 6e-4))
+            elif fam == 6:
+                # entrainment-rate / Lscale_max sweep on a convective
+                # column
+                T = np.maximum(300.0 - 0.0085 * z_t, 210.0)
+                thlm = T / exner
+                rtm = np.full(nz, 4e-3)
+                em = 0.8 * bl_m + 1e-3
+                mu = [0.00025, 0.001, 0.002, MU_EAMV3][c // 8 % 4]
+                lmax = 1.0e5 if c % 16 >= 8 else 0.25 * HOST_DXY
+            else:
+                # randomized with sharp inversions + noise (nonlocal
+                # Lscale_up/down smoothing coverage)
+                T = np.maximum(rng.uniform(280.0, 300.0)
+                               - rng.uniform(0.004, 0.009) * z_t, 205.0)
+                T += 4.0 * (z_t > rng.uniform(1000.0, 4000.0))
+                thlm = T / exner + rng.normal(0.0, 0.3, nz)
+                rtm = np.clip(rng.uniform(0.2, 0.9)
+                              * d.drv_sat(p, T)[0], 1e-7, 0.02)
+                em = rng.uniform(0.05, 1.0, nz) * bl_m + 6e-4
+            thv_ds = thlm.copy()
+            thvm = thlm + 0.61 * thv_ds * rtm
+        for k, v in [("thvm", thvm), ("thlm", thlm), ("rtm", rtm),
+                     ("em", em), ("p", p), ("exner", exner),
+                     ("thv_ds", thv_ds)]:
+            ml_ins[k][c] = v
+        ml_mu[c] = mu
+        ml_lmax[c] = lmax
+        ls, lu, ld, e = d.drv_compute_mixing_length(
+            thvm, thlm, rtm, em, lmax, mu, p, exner, thv_ds)
+        assert e == 0, c
+        ml_outs["lscale"][c] = ls
+        ml_outs["lscale_up"][c] = lu
+        ml_outs["lscale_down"][c] = ld
+
+    # branch coverage: Lscale_max cap and the lminh surface floor
+    assert (ml_outs["lscale"] == ml_lmax[:, None]).any()
+    lminh = np.maximum(0.0, 500.0 - (z_t - z_m[0])) * lmin \
+        * (1.0 / 500.0)
+    assert (ml_outs["lscale_up"][:, 1:] == lminh[None, 1:]).any()
+    assert (ml_outs["lscale_down"][:, 1:] == lminh[None, 1:]).any()
+    print(f"ml coverage: cap {(ml_outs['lscale'] == ml_lmax[:, None]).sum()}"
+          f", up floor {(ml_outs['lscale_up'][:, 1:] == lminh[None, 1:]).sum()}"
+          f", down floor {(ml_outs['lscale_down'][:, 1:] == lminh[None, 1:]).sum()}")
+
+    out.update({f"ml_in_{k}": v for k, v in ml_ins.items()})
+    out.update(ml_mu=ml_mu, ml_lscale_max=ml_lmax)
+    out.update({f"ml_out_{k}": v for k, v in ml_outs.items()})
+
+    # ---- BV: calc_brunt_vaisala_freq_sqd, all three formula variants
+    # (dry-T0 = EAMv3, dry-thvm, moist Durran-Klemp) -------------------
+    nbv = 16
+    bv_ins = {k: np.zeros((nbv, nz)) for k in BV_IN}
+    bv_outs = {k: np.zeros((nbv, nz)) for k in
+               ["dry_t0", "dry_thvm", "moist"]}
+    for c in range(nbv):
+        j = c % 25
+        thlm = seg_ins["thlm"][j]
+        exner = seg_ins["exner"][j]
+        rtm = seg_ins["rtm"][j]
+        p = seg_ins["p"][j]
+        thvm = seg_outs[j, :, 1]
+        rcm = seg_ins["rcm"][j].copy()
+        if c % 2 == 1:
+            # synthetic cloud band (moist formula sensitivity)
+            band = (z_t > 800.0) & (z_t < 3000.0)
+            rcm[band] = np.maximum(rcm[band], 3e-4)
+        for k, v in [("thlm", thlm), ("exner", exner), ("rtm", rtm),
+                     ("rcm", rcm), ("p", p), ("thvm", thvm)]:
+            bv_ins[k][c] = v
+        args = [thlm, exner, rtm, rcm, p, thvm]
+        d.drv_set_bv_flags(False, False)
+        bv_outs["dry_t0"][c] = d.drv_brunt_vaisala(*args)
+        d.drv_set_bv_flags(False, True)
+        bv_outs["dry_thvm"][c] = d.drv_brunt_vaisala(*args)
+        d.drv_set_bv_flags(True, False)
+        bv_outs["moist"][c] = d.drv_brunt_vaisala(*args)
+        d.drv_set_bv_flags(False, False)   # restore EAMv3
+    out.update({f"bv_in_{k}": v for k, v in bv_ins.items()})
+    out.update({f"bv_out_{k}": v for k, v in bv_outs.items()})
+
+    # ---- SPLAT: term_wp2_splat / term_wp3_splat ----------------------
+    # EAMv3 C_wp2_splat = 0 (exact-zero tendencies) plus a nonzero
+    # sweep that exercises the five/dt clip.
+    nsp = 12
+    sp_ins = {k: np.zeros((nsp, nz)) for k in
+              ["wp2", "wp2_zt", "wp3", "tau_zm", "tau_zt"]}
+    sp_c = np.zeros(nsp)
+    sp_outs = {k: np.zeros((nsp, nz)) for k in
+               ["wp2_splat", "wp3_splat"]}
+    for c in range(nsp):
+        j = c % 25
+        wp2 = seg_ins["wp2"][j].copy()
+        wp3 = seg_ins["wp3"][j].copy()
+        if c % 3 == 2:
+            # sharp step in wp2 -> huge d(sqrt(wp2))/dz -> clip arm
+            wp2 = np.where(z_m < 400.0, 1.5, W_TOL_SQD)
+            wp3 = 0.5 * wp2 ** 1.5
+        wp2_zt = np.maximum(_zm2zt_f(wp2, nz), W_TOL_SQD)
+        tau_zm = seg_outs[j, :, 7]
+        tau_zt = seg_outs[j, :, 6]
+        cs = 0.0 if c < 6 else 2.0
+        for k, v in [("wp2", wp2), ("wp2_zt", wp2_zt), ("wp3", wp3),
+                     ("tau_zm", tau_zm), ("tau_zt", tau_zt)]:
+            sp_ins[k][c] = v
+        sp_c[c] = cs
+        w2s, w3s = d.drv_term_splat(DT_EAMV3, cs, wp2, wp2_zt, wp3,
+                                    tau_zm, tau_zt)
+        sp_outs["wp2_splat"][c] = w2s
+        sp_outs["wp3_splat"][c] = w3s
+    # coverage: the five/dt clip must engage somewhere for C=2
+    clip_lim = 5.0 / DT_EAMV3
+    engaged = (sp_outs["wp2_splat"][6:] ==
+               -sp_ins["wp2"][6:] * clip_lim).any()
+    assert engaged
+    assert (sp_outs["wp2_splat"][:6] == -0.0).all()  # C=0 exact zeros
+    out.update({f"sp_in_{k}": v for k, v in sp_ins.items()})
+    out.update(sp_c_wp2_splat=sp_c)
+    out.update({f"sp_out_{k}": v for k, v in sp_outs.items()})
+
+    # ---- SV: calc_surface_varnce scalar sweeps -----------------------
+    sv_cases = []
+    for f in SEG_SFC_FLUXES:
+        sv_cases.append(dict(wpthlp=f[0], wprtp=f[1], upwp=f[2],
+                             vpwp=f[3], um=5.0, vm=-3.0, lup=150.0,
+                             splat=0.0, tau=600.0))
+    # sign sweeps + tolerance floors + wstar branch
+    for wpthlp in [-0.3, -0.02, 0.0, 1e-13, 0.02, 0.4]:
+        for wprtp in [-2e-4, 0.0, 8e-4]:
+            sv_cases.append(dict(wpthlp=wpthlp, wprtp=wprtp,
+                                 upwp=-0.05, vpwp=0.02, um=8.0,
+                                 vm=1.0, lup=300.0, splat=0.0,
+                                 tau=600.0))
+    # splatting correction: both arms (mild -> additive, strong ->
+    # min_wp2 correlation-guard branch)
+    for splat, tau in [(-1e-5, 100.0), (-0.005, 900.0), (-5.0, 900.0),
+                       (0.0, 900.0)]:
+        sv_cases.append(dict(wpthlp=0.15, wprtp=3e-4, upwp=-0.3,
+                             vpwp=0.2, um=10.0, vm=-4.0, lup=800.0,
+                             splat=splat, tau=tau))
+    # randomized
+    for _ in range(14):
+        sv_cases.append(dict(
+            wpthlp=rng.uniform(-0.4, 0.4), wprtp=rng.uniform(-1e-3, 1e-3),
+            upwp=rng.uniform(-0.6, 0.6), vpwp=rng.uniform(-0.6, 0.6),
+            um=rng.uniform(-15.0, 15.0), vm=rng.uniform(-15.0, 15.0),
+            lup=rng.uniform(0.1, 2000.0),
+            splat=-(10.0 ** rng.uniform(-6.0, 0.5)),
+            tau=rng.uniform(50.0, 3000.0)))
+    nsv = len(sv_cases)
+    sv_in = {k: np.zeros(nsv) for k in
+             ["wpthlp", "wprtp", "upwp", "vpwp", "um", "vm", "lup",
+              "splat", "tau"]}
+    sv_out = np.zeros((nsv, 6))
+    for c, case in enumerate(sv_cases):
+        for k in sv_in:
+            sv_in[k][c] = case[k]
+        outs, e = d.drv_calc_surface_varnce(
+            case["upwp"], case["vpwp"], case["wpthlp"], case["wprtp"],
+            case["um"], case["vm"], case["lup"], case["splat"],
+            case["tau"])
+        assert e == 0, c
+        sv_out[c] = outs
+    # coverage: tolerance floors, and the min_wp2 correlation guard
+    assert (sv_out[:, 3] == THL_TOL ** 2).any()
+    assert (sv_out[:, 4] == RT_TOL ** 2).any()
+    mmcf_sqd = 0.99 * 0.99
+    minv = np.maximum.reduce([
+        np.full(nsv, W_TOL_SQD),
+        sv_in["wprtp"] * sv_in["wprtp"] / (sv_out[:, 4] * mmcf_sqd),
+        sv_in["wpthlp"] * sv_in["wpthlp"] / (sv_out[:, 3] * mmcf_sqd)])
+    guard = sv_out[:, 0] == minv
+    assert guard.any() and (~guard).any()
+    print(f"sv coverage: thl floor {(sv_out[:, 3] == THL_TOL**2).sum()}, "
+          f"rt floor {(sv_out[:, 4] == RT_TOL**2).sum()}, "
+          f"min_wp2 guard {guard.sum()}/{nsv}")
+    out.update({f"sv_in_{k}": v for k, v in sv_in.items()})
+    out.update(sv_outs=sv_out)
+
+    return out
+
+
 def main(which=None):
     params, idx = eamv3_params()
     xp2_idx = {n: int(i) - 1 for n, i in
                zip(XP2_IDX_NAMES, d.drv_param_indices_xp2())}
+    lscale_idx = {n: int(i) - 1 for n, i in
+                  zip(LSCALE_IDX_NAMES, d.drv_param_indices_lscale())}
     sha = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"],
                          capture_output=True, text=True).stdout.strip()
     meta = dict(
@@ -1052,6 +1546,27 @@ def main(which=None):
         eamv3_overrides=EAMV3_OVERRIDES,
         param_indices={k: int(v) for k, v in idx.items()},
         xp2_param_indices=xp2_idx,
+        lscale_param_indices=lscale_idx,
+        lscale_config=dict(
+            # model_flags defaults; clubb_intr never overrides these
+            # (EAMv3 clubb_stabcorrect=F only touches
+            # l_stability_correct_Kh_N2_zm / l_diffuse_rtm_and_thlm)
+            l_stability_correct_tau_zm=True,
+            l_diag_Lscale_from_tau=False,
+            l_use_C7_Richardson=False, l_use_C11_Richardson=False,
+            l_use_wp3_pr3=False,          # => Cx_fnc_Richardson = 0
+            l_avg_Lscale=False,           # COMPILE-TIME parameter in
+                                          # advance_clubb_core: the
+                                          # perturbed-Lscale calls and
+                                          # averaging are dead in EAM
+            l_Lscale_plume_centered=False, l_use_ice_latent=False,
+            l_brunt_vaisala_freq_moist=False,
+            l_use_thvm_in_bv_freq=False, l_sat_mixrat_lookup=False,
+            l_include_ice=False,          # compute_rsat_parcel
+            l_andre_1978=False,           # calc_surface_varnce
+            l_tke_aniso=True, lmin=4.0, T0=300.0,
+            lscale_max=0.25 * HOST_DXY, mu=MU_EAMV3),
+        seg_slots=SEG_SLOTS, sfc_slots=SFC_SLOTS,
         xp2_config=dict(l_iter_xp2_xpyp=True, l_single_C2_Skw=False,
                         l_explicit_turbulent_adv_xpyp=False,
                         l_upwind_xpyp_ta=True,
@@ -1081,6 +1596,7 @@ def main(which=None):
         "pdf_closure": lambda: gen_pdf_closure(params, idx),
         "pdf_driver": lambda: gen_pdf_driver(params, idx),
         "xp2": lambda: gen_xp2(params, idx),
+        "lscale": lambda: gen_lscale(params, idx),
     }
     for name in (which or gens):
         np.savez_compressed(GOLDEN / f"clubb_{name}.npz", meta=meta_s,

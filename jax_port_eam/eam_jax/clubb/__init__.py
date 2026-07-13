@@ -1,5 +1,5 @@
-"""JAX port of EAMv3 CLUBB — slices A, B and C (see PORTING_PLAN.md
-row 12).
+"""JAX port of EAMv3 CLUBB — slices A, B, C and D (see
+PORTING_PLAN.md row 12).
 
 Delivered so far, all validated against the eam_clubb_f f2py harness
 (the ENTIRE unmodified components/eam/src/physics/clubb stack
@@ -50,6 +50,31 @@ compiled with EAM's defines -DCLUBB_CAM -DCLUBB_SGS
                   post-advance wprtp/wpthlp/upwp/vpwp correlation
                   clip, l_tke_aniso=T).
 
+- mixing_length.py  (slice D) compute_mixing_length: the parcel-based
+                  nonlocal Lscale (entraining up/down parcels, exact
+                  per-level sequential TKE-exhaustion loops,
+                  quadratic-formula sub-grid remainder, max-altitude
+                  smoothing, lminh surface floor, sqrt(up*down),
+                  Lscale_max cap).  The l_avg_Lscale perturbed-Lscale
+                  averaging is DEAD in EAM (compile-time .false.
+                  parameter in advance_clubb_core) — one call only.
+- stability.py    (slice D) calc_brunt_vaisala_freq_sqd (all three
+                  variants; EAMv3 active = dry (g/T0)*ddzt(thlm)),
+                  calc_stability_correction (ACTIVE:
+                  l_stability_correct_tau_zm=T), term_wp2_splat /
+                  term_wp3_splat (C_wp2_splat=0 in EAMv3).
+                  compute_Cx_fnc_Richardson is DEAD (documented, not
+                  ported: l_use_C7_Richardson = l_use_C11_Richardson
+                  = l_use_wp3_pr3 = F -> Cx_fnc_Richardson = 0).
+- surface_varnce.py  (slice D) calc_surface_varnce (surface moments
+                  from surface fluxes; l_andre_1978=F compile-time).
+- lscale_tau.py   (slice D) the inline advance_clubb_core segment
+                  em -> thvm -> Lscale -> tau_zt/tau_zm -> Kh ->
+                  splat -> surface variances -> stability-corrected
+                  tau_N2_zm (+ Cx=0), goldened against a verbatim
+                  Fortran transcription that is validated BITWISE
+                  against the real advance_clubb_core khzm/khzt.
+
 EAM configuration baked into the port scope (all verbatim from
 clubb_intr.F90 + model_flags.F90 defaults; goldens use the same):
 sclr_dim=0, hydromet_dim=0, iiPDF_type=iiPDF_ADG1 (compile-time),
@@ -65,5 +90,6 @@ coupling read_parameters applies); the goldens record the full packed
 params vector.
 """
 
-from . import (advance_xp2_xpyp, grid, pdf_closure,  # noqa: F401
-               pdf_closure_driver, saturation, tridiag)
+from . import (advance_xp2_xpyp, grid, lscale_tau,  # noqa: F401
+               mixing_length, pdf_closure, pdf_closure_driver,
+               saturation, stability, surface_varnce, tridiag)

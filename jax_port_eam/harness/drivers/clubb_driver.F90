@@ -11,6 +11,16 @@
 !          tunables (C4/C5/C14/c_K2/c_K9/nu2/nu9), the
 !          setup_parameters-derived nu2/nu9_vert_res_dep profiles, and
 !          the model_flags/sponge configuration the routine reads.
+! Slice D: Lscale/tau infrastructure.  compute_mixing_length,
+!          calc_brunt_vaisala_freq_sqd, calc_stability_correction,
+!          term_wp2_splat/term_wp3_splat and calc_surface_varnce are
+!          all PUBLIC and driven directly; drv_lscale_tau_segment is a
+!          documented VERBATIM TRANSCRIPTION of the inline
+!          advance_clubb_core segment (em -> thvm -> Lscale -> tau ->
+!          Kh -> splat -> surface variances -> stability-corrected
+!          tau), validated end-to-end against the REAL
+!          advance_clubb_core through its khzm/khzt diagnostics
+!          (bitwise, asserted in gen_clubb_golden.py).
 !
 ! Setup mirrors EAM's clubb_intr.F90 exactly:
 !   clubb_ini_cam:  set_clubb_debug_level_api(0);
@@ -888,5 +898,306 @@ contains
     upwp_out = upwp
     vpwp_out = vpwp
   end subroutine drv_clip_covars_denom
+
+  !---------------------------------------------------------------------
+  ! Slice D getters ----------------------------------------------------
+  ! 1-based indices into params for the additional tunables the
+  ! Lscale/tau infrastructure reads.
+  subroutine drv_param_indices_lscale(idx)
+    use parameter_indices, only: ic_K, itaumin, itaumax, &
+        iLscale_mu_coef, iLscale_pert_coef, ilmin_coef, iC_wp2_splat, &
+        ilambda0_stability_coef, iup2_vp2_factor
+    integer, intent(out) :: idx(9)
+    idx = (/ ic_K, itaumin, itaumax, iLscale_mu_coef, &
+             iLscale_pert_coef, ilmin_coef, iC_wp2_splat, &
+             ilambda0_stability_coef, iup2_vp2_factor /)
+  end subroutine drv_param_indices_lscale
+
+  ! Derived/module state the slice-D routines read:
+  !   lmin  = lmin_coef * 40 m (setup_parameters; NOT in params vector)
+  !   T0    = theta0 from setup_clubb_core (parameters_model)
+  ! iflags:
+  !   1 l_stability_correct_tau_zm   2 l_diag_Lscale_from_tau
+  !   3 l_use_C7_Richardson          4 l_use_C11_Richardson
+  !   5 l_use_wp3_pr3                6 l_Lscale_plume_centered
+  !   7 l_use_ice_latent             8 l_brunt_vaisala_freq_moist
+  !   9 l_use_thvm_in_bv_freq       10 l_sat_mixrat_lookup
+  !  11 l_tke_aniso
+  subroutine drv_lscale_config(lmin_out, t0_out, iflags)
+    use parameters_tunable, only: lmin
+    use parameters_model, only: T0
+    use model_flags, only: l_stability_correct_tau_zm, &
+        l_diag_Lscale_from_tau, l_use_C7_Richardson, &
+        l_use_C11_Richardson, l_use_wp3_pr3, l_Lscale_plume_centered, &
+        l_use_ice_latent, l_brunt_vaisala_freq_moist, &
+        l_use_thvm_in_bv_freq, l_sat_mixrat_lookup, l_tke_aniso
+    real(r8), intent(out) :: lmin_out, t0_out
+    integer, intent(out) :: iflags(11)
+    lmin_out = lmin
+    t0_out = T0
+    iflags = 0
+    if (l_stability_correct_tau_zm) iflags(1) = 1
+    if (l_diag_Lscale_from_tau) iflags(2) = 1
+    if (l_use_C7_Richardson) iflags(3) = 1
+    if (l_use_C11_Richardson) iflags(4) = 1
+    if (l_use_wp3_pr3) iflags(5) = 1
+    if (l_Lscale_plume_centered) iflags(6) = 1
+    if (l_use_ice_latent) iflags(7) = 1
+    if (l_brunt_vaisala_freq_moist) iflags(8) = 1
+    if (l_use_thvm_in_bv_freq) iflags(9) = 1
+    if (l_sat_mixrat_lookup) iflags(10) = 1
+    if (l_tke_aniso) iflags(11) = 1
+  end subroutine drv_lscale_config
+
+  ! Toggle the Brunt-Vaisala variant flags (module variables) so all
+  ! three formula branches can be goldened; the generator restores the
+  ! EAMv3 defaults (F, F) afterwards.
+  subroutine drv_set_bv_flags(l_moist, l_use_thvm)
+    use model_flags, only: l_brunt_vaisala_freq_moist, &
+        l_use_thvm_in_bv_freq
+    logical, intent(in) :: l_moist, l_use_thvm
+    l_brunt_vaisala_freq_moist = l_moist
+    l_use_thvm_in_bv_freq = l_use_thvm
+  end subroutine drv_set_bv_flags
+
+  !---------------------------------------------------------------------
+  ! The REAL (public) compute_mixing_length, exactly as
+  ! advance_clubb_core calls it (l_implemented=.true.; mu = the
+  ! module tunable newmu -- passed explicitly here so entrainment-rate
+  ! sweeps can be goldened).
+  subroutine drv_compute_mixing_length(nz, thvm, thlm, rtm, em, &
+      lscale_max_in, mu_in, p_in_pa, exner, thv_ds, &
+      lscale, lscale_up, lscale_down, err_out)
+    use mixing_length, only: compute_mixing_length
+    use error_code, only: err_code, clubb_no_error
+    integer, intent(in) :: nz
+    real(r8), intent(in), dimension(nz) :: thvm, thlm, rtm, em, &
+        p_in_pa, exner, thv_ds
+    real(r8), intent(in) :: lscale_max_in, mu_in
+    real(r8), intent(out), dimension(nz) :: lscale, lscale_up, &
+        lscale_down
+    integer, intent(out) :: err_out
+    err_code = clubb_no_error
+    call compute_mixing_length( thvm, thlm,                        & ! in
+                         rtm, em, lscale_max_in, p_in_pa,          & ! in
+                         exner, thv_ds, mu_in, .true.,             & ! in
+                         lscale, lscale_up, lscale_down )            ! out
+    err_out = err_code
+    err_code = clubb_no_error
+  end subroutine drv_compute_mixing_length
+
+  !---------------------------------------------------------------------
+  ! The REAL (public) calc_brunt_vaisala_freq_sqd under the CURRENT
+  ! model_flags (see drv_set_bv_flags for the variants).
+  subroutine drv_brunt_vaisala(nz, thlm, exner, rtm, rcm, p_in_pa, &
+                               thvm, bv_out)
+    use advance_helper_module, only: calc_brunt_vaisala_freq_sqd
+    integer, intent(in) :: nz
+    real(r8), intent(in), dimension(nz) :: thlm, exner, rtm, rcm, &
+        p_in_pa, thvm
+    real(r8), intent(out) :: bv_out(nz)
+    call calc_brunt_vaisala_freq_sqd( thlm, exner, rtm, rcm, &
+                                      p_in_pa, thvm, bv_out )
+  end subroutine drv_brunt_vaisala
+
+  ! The REAL (public) calc_stability_correction (uses the EAMv3 dry-T0
+  ! Brunt-Vaisala branch and lambda0_stability_coef).
+  subroutine drv_stability_correction(nz, thlm, lscale, em, exner, &
+      rtm, rcm, p_in_pa, thvm, sc_out)
+    use advance_helper_module, only: calc_stability_correction
+    integer, intent(in) :: nz
+    real(r8), intent(in), dimension(nz) :: thlm, lscale, em, exner, &
+        rtm, rcm, p_in_pa, thvm
+    real(r8), intent(out) :: sc_out(nz)
+    sc_out = calc_stability_correction( thlm, lscale, em, exner, &
+                                        rtm, rcm, p_in_pa, thvm )
+  end subroutine drv_stability_correction
+
+  ! The REAL (public) term_wp2_splat + term_wp3_splat.  C_wp2_splat is
+  ! an explicit argument of both routines (EAMv3 passes the tunable,
+  ! default 0.0 -- a nonzero sweep goldens the clip branch).
+  subroutine drv_term_splat(nz, dt, c_wp2_splat_in, wp2, wp2_zt, wp3, &
+                            tau_zm, tau_zt, wp2_splat, wp3_splat)
+    use advance_helper_module, only: term_wp2_splat, term_wp3_splat
+    integer, intent(in) :: nz
+    real(r8), intent(in) :: dt, c_wp2_splat_in
+    real(r8), intent(in), dimension(nz) :: wp2, wp2_zt, wp3, tau_zm, &
+        tau_zt
+    real(r8), intent(out), dimension(nz) :: wp2_splat, wp3_splat
+    call term_wp2_splat( c_wp2_splat_in, nz, dt, wp2, wp2_zt, tau_zm, &
+                         wp2_splat )
+    call term_wp3_splat( c_wp2_splat_in, nz, dt, wp2, wp3, tau_zt, &
+                         wp3_splat )
+  end subroutine drv_term_splat
+
+  !---------------------------------------------------------------------
+  ! The REAL (public) calc_surface_varnce, exactly as
+  ! advance_clubb_core calls it (sclr_dim = 0; l_andre_1978 = .false.
+  ! is compile-time in surface_varnce_module).
+  ! outs slots: 1 wp2  2 up2  3 vp2  4 thlp2  5 rtp2  6 rtpthlp
+  subroutine drv_calc_surface_varnce(upwp_sfc, vpwp_sfc, wpthlp_sfc, &
+      wprtp_sfc, um_sfc, vm_sfc, lscale_up_sfc, wp2_splat_sfc, &
+      tau_zm_sfc, outs, err_out)
+    use surface_varnce_module, only: calc_surface_varnce
+    use error_code, only: err_code, clubb_no_error
+    real(r8), intent(in) :: upwp_sfc, vpwp_sfc, wpthlp_sfc, &
+        wprtp_sfc, um_sfc, vm_sfc, lscale_up_sfc, wp2_splat_sfc, &
+        tau_zm_sfc
+    real(r8), intent(out) :: outs(6)
+    integer, intent(out) :: err_out
+    real(r8), dimension(0) :: wpsclrp_sfc, sclrp2_sfc, sclrprtp_sfc, &
+        sclrpthlp_sfc
+    err_code = clubb_no_error
+    call calc_surface_varnce( upwp_sfc, vpwp_sfc, wpthlp_sfc,       & ! in
+                         wprtp_sfc, um_sfc, vm_sfc, lscale_up_sfc,  & ! in
+                         wpsclrp_sfc, wp2_splat_sfc, tau_zm_sfc,    & ! in
+                         outs(1), outs(2), outs(3),                 & ! out
+                         outs(4), outs(5), outs(6),                 & ! out
+                         sclrp2_sfc, sclrprtp_sfc, sclrpthlp_sfc )    ! out
+    err_out = err_code
+    err_code = clubb_no_error
+  end subroutine drv_calc_surface_varnce
+
+  !---------------------------------------------------------------------
+  ! VERBATIM TRANSCRIPTION of the inline Lscale/tau segment of
+  ! advance_clubb_core (advance_clubb_core_module.F90, EAMv3 path):
+  !   wp2_zt (line ~1006), thvm (~1083), em l_tke_aniso=T (~1094),
+  !   sqrt_em_zt (~1097), the single compute_mixing_length call
+  !   (~1244; l_avg_Lscale=.false. is a COMPILE-TIME parameter, so the
+  !   perturbed-Lscale calls and the averaging are dead), tau_zt/tau_zm
+  !   (~1271), Kh_zt/Kh_zm (~1336), term_wp2_splat/term_wp3_splat
+  !   (~1346), the surface-variance branch (~1360; sfc_elevation
+  !   comparison verbatim), calc_stability_correction (~1483),
+  !   tau_N2_zm = tau_zm/stability_correction under
+  !   l_stability_correct_tau_zm=.true. (~1497), and
+  !   Cx_fnc_Richardson = 0 (~1515; l_use_C7_Richardson =
+  !   l_use_C11_Richardson = l_use_wp3_pr3 = .false.).
+  !   set_Lscale_max is private; its l_implemented=T body is one line,
+  !   transcribed at the top.
+  ! Validated end-to-end: Kh_zm/Kh_zt here must match the khzm/khzt
+  ! diagnostics of the REAL drv_advance_clubb_core on the same entry
+  ! state BITWISE (asserted in gen_clubb_golden.py).
+  !
+  ! seg(:,14) slots:
+  !   1 em        2 thvm      3 sqrt_em_zt  4 Lscale  5 Lscale_up
+  !   6 Lscale_down  7 tau_zt  8 tau_zm  9 Kh_zt  10 Kh_zm
+  !  11 wp2_splat  12 wp3_splat  13 stability_correction  14 tau_N2_zm
+  ! sfc(6): wp2(1), up2(1), vp2(1), thlp2(1), rtp2(1), rtpthlp(1)
+  ! after the surface-variance update.
+  subroutine drv_lscale_tau_segment(nz, dt, sfc_elevation, host_dx, &
+      host_dy, wpthlp_sfc, wprtp_sfc, upwp_sfc, vpwp_sfc, thlm, rtm, &
+      rcm, wp2, wp3, up2, vp2, um, vm, p_in_pa, exner, thv_ds_zt, &
+      seg, sfc, err_out)
+    use grid_class, only: gr, zm2zt, zt2zm
+    use mixing_length, only: compute_mixing_length
+    use advance_helper_module, only: calc_stability_correction, &
+        term_wp2_splat, term_wp3_splat
+    use surface_varnce_module, only: calc_surface_varnce
+    use parameters_tunable, only: mu, c_K, taumax, C_wp2_splat
+    use constants_clubb, only: w_tol_sqd, em_min, ep1, ep2, Lv, Cp, &
+        zero_threshold, eps, thl_tol, rt_tol
+    use model_flags, only: l_stability_correct_tau_zm
+    use error_code, only: err_code, clubb_no_error
+    integer, intent(in) :: nz
+    real(r8), intent(in) :: dt, sfc_elevation, host_dx, host_dy, &
+        wpthlp_sfc, wprtp_sfc, upwp_sfc, vpwp_sfc
+    real(r8), intent(in), dimension(nz) :: thlm, rtm, rcm, wp2, wp3, &
+        up2, vp2, um, vm, p_in_pa, exner, thv_ds_zt
+    real(r8), intent(out) :: seg(nz, 14)
+    real(r8), intent(out) :: sfc(6)
+    integer, intent(out) :: err_out
+
+    real(r8), dimension(nz) :: wp2_zt, thvm, em, sqrt_em_zt, &
+        Lscale, Lscale_up, Lscale_down, tau_zt, tau_zm, Kh_zt, Kh_zm, &
+        wp2_splat, wp3_splat, stability_correction, tau_N2_zm
+    real(r8), dimension(0) :: wpsclrp_sfc, sclrp2_sfc, sclrprtp_sfc, &
+        sclrpthlp_sfc
+    real(r8) :: Lscale_max, wp2_1, up2_1, vp2_1, thlp2_1, rtp2_1, &
+        rtpthlp_1
+
+    if (nz /= gr%nz) stop 'drv_lscale_tau_segment: nz mismatch'
+    err_code = clubb_no_error
+
+    ! set_Lscale_max, l_implemented=.true. branch
+    Lscale_max = 0.25_r8 * min( host_dx, host_dy )
+
+    wp2_zt = max( zm2zt( wp2 ), w_tol_sqd )
+
+    thvm = thlm + ep1 * thv_ds_zt * rtm &
+                + ( Lv/(Cp*exner) - ep2 * thv_ds_zt ) * rcm
+
+    ! l_tke_aniso = .true.
+    em = 0.5_r8 * ( wp2 + vp2 + up2 )
+
+    sqrt_em_zt = SQRT( MAX( em_min, zm2zt( em ) ) )
+
+    call compute_mixing_length( thvm, thlm,                        & ! in
+                         rtm, em, Lscale_max, p_in_pa,             & ! in
+                         exner, thv_ds_zt, mu, .true.,             & ! in
+                         Lscale, Lscale_up, Lscale_down )            ! out
+
+    tau_zt = MIN( Lscale / sqrt_em_zt, taumax )
+    tau_zm = MIN( ( MAX( zt2zm( Lscale ), zero_threshold )  &
+                   / SQRT( MAX( em_min, em ) ) ), taumax )
+
+    Kh_zt = c_K * Lscale * sqrt_em_zt
+    Kh_zm = c_K * max( zt2zm( Lscale ), zero_threshold )  &
+                * sqrt( max( em, em_min ) )
+
+    call term_wp2_splat( C_wp2_splat, gr%nz, dt, wp2, wp2_zt, tau_zm, &
+                         wp2_splat )
+    call term_wp3_splat( C_wp2_splat, gr%nz, dt, wp2, wp3, tau_zt, &
+                         wp3_splat )
+
+    if ( abs(gr%zm(1)-sfc_elevation) &
+         <= abs(gr%zm(1)+sfc_elevation)*eps/2 ) then
+      call calc_surface_varnce( upwp_sfc, vpwp_sfc, wpthlp_sfc,     & ! in
+                           wprtp_sfc, um(2), vm(2), Lscale_up(2),   & ! in
+                           wpsclrp_sfc, wp2_splat(1), tau_zm(1),    & ! in
+                           wp2_1, up2_1, vp2_1,                     & ! out
+                           thlp2_1, rtp2_1, rtpthlp_1,              & ! out
+                           sclrp2_sfc, sclrprtp_sfc, sclrpthlp_sfc )  ! out
+    else
+      wp2_1     = w_tol_sqd
+      up2_1     = w_tol_sqd
+      vp2_1     = w_tol_sqd
+      thlp2_1   = thl_tol**2
+      rtp2_1    = rt_tol**2
+      rtpthlp_1 = 0.0_r8
+    end if
+
+    stability_correction = calc_stability_correction( thlm, Lscale, &
+        em, exner, rtm, rcm, p_in_pa, thvm )
+
+    if ( l_stability_correct_tau_zm ) then
+      tau_N2_zm = tau_zm / stability_correction
+    else
+      tau_N2_zm = -999._r8   ! unused_var
+    end if
+
+    err_out = err_code
+    err_code = clubb_no_error
+
+    seg(:, 1) = em
+    seg(:, 2) = thvm
+    seg(:, 3) = sqrt_em_zt
+    seg(:, 4) = Lscale
+    seg(:, 5) = Lscale_up
+    seg(:, 6) = Lscale_down
+    seg(:, 7) = tau_zt
+    seg(:, 8) = tau_zm
+    seg(:, 9) = Kh_zt
+    seg(:, 10) = Kh_zm
+    seg(:, 11) = wp2_splat
+    seg(:, 12) = wp3_splat
+    seg(:, 13) = stability_correction
+    seg(:, 14) = tau_N2_zm
+    sfc(1) = wp2_1
+    sfc(2) = up2_1
+    sfc(3) = vp2_1
+    sfc(4) = thlp2_1
+    sfc(5) = rtp2_1
+    sfc(6) = rtpthlp_1
+  end subroutine drv_lscale_tau_segment
 
 end module clubb_driver
