@@ -43,20 +43,30 @@ SHR_SOURCES = [
 ]
 
 
-def build_extension(name, sources, driver, includes=(), fflags=()):
-    """Compile `sources` (dependency order) to .o, then f2py-wrap
-    `driver` linking them. Returns the path of the built extension."""
+def build_extension(name, sources, driver, includes=(), fflags=(),
+                    link_flags=()):
+    """Compile `sources` (dependency order; .c compiled via gcc) to .o,
+    then f2py-wrap `driver` linking them (plus `link_flags`, e.g.
+    ['-lnetcdff']). Returns the path of the built extension."""
     bdir = BUILD / name
     bdir.mkdir(parents=True, exist_ok=True)
     FMOD.mkdir(exist_ok=True)
 
     flags = FFLAGS + list(fflags) + [f"-I{i}" for i in includes] \
         + ["-J", str(bdir), "-I", str(bdir)]
+    cflags = ["-O2", "-fPIC"] + [f for f in fflags if f.startswith("-D")] \
+        + [f"-I{i}" for i in includes]
     objs = []
     for src in map(Path, sources):
         obj = bdir / (src.stem + ".o")
-        cmd = ["gfortran", "-c", str(src), "-o", str(obj)] + flags
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        if src.suffix == ".c":
+            cmd = ["gcc", "-c", str(src), "-o", str(obj)] + cflags
+        else:
+            cmd = ["gfortran", "-c", str(src), "-o", str(obj)] + flags
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            sys.stderr.write(r.stdout[-2000:] + "\n" + r.stderr[-4000:])
+            raise RuntimeError(f"compile of {src} failed")
         objs.append(str(obj))
 
     env = dict(os.environ)
@@ -72,7 +82,7 @@ def build_extension(name, sources, driver, includes=(), fflags=()):
            str(Path(driver).resolve()), "-m", name,
            "--f2cmap", str(HERE / "f2py_f2cmap")] + objs \
         + [f"--f90flags={' '.join(FFLAGS + list(fflags))} -I{bdir} "
-           + " ".join(f"-I{i}" for i in includes)]
+           + " ".join(f"-I{i}" for i in includes)] + list(link_flags)
     r = subprocess.run(cmd, cwd=bdir, capture_output=True, text=True,
                        env=env)
     if r.returncode != 0:
