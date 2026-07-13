@@ -6,6 +6,11 @@
 !          via the verbatim extraction module clubb_pdf_extract (see
 !          build_clubb.py), plus the full advance_clubb_core for
 !          end-to-end validation of that extraction.
+! Slice C: advance_xp2_xpyp (PUBLIC -- driven directly, no extraction
+!          needed) + clip_covars_denom, plus getters for the extra
+!          tunables (C4/C5/C14/c_K2/c_K9/nu2/nu9), the
+!          setup_parameters-derived nu2/nu9_vert_res_dep profiles, and
+!          the model_flags/sponge configuration the routine reads.
 !
 ! Setup mirrors EAM's clubb_intr.F90 exactly:
 !   clubb_ini_cam:  set_clubb_debug_level_api(0);
@@ -716,5 +721,172 @@ contains
     call pack_pdf_params(nz, pdf_params, pdfp_zt)
     call pack_pdf_params(nz, pdf_params_zm, pdfp_zm)
   end subroutine drv_advance_clubb_core
+
+  !---------------------------------------------------------------------
+  ! Slice C getters ----------------------------------------------------
+  ! 1-based indices into params for the additional tunables
+  ! advance_xp2_xpyp reads (beta is already in drv_param_indices).
+  subroutine drv_param_indices_xp2(idx)
+    use parameter_indices, only: iC4, iC5, iC14, ic_K2, ic_K9, inu2, inu9
+    integer, intent(out) :: idx(7)
+    idx = (/ iC4, iC5, iC14, ic_K2, ic_K9, inu2, inu9 /)
+  end subroutine drv_param_indices_xp2
+
+  ! The setup_parameters-derived background-diffusivity profiles
+  ! (l_adj_low_res_nu=.true. compile-time: nu * scalar mult_factor from
+  ! the average grid spacing) and the model_flags / sponge-settings
+  ! configuration advance_xp2_xpyp + clip_covars_denom read.  iflags:
+  !   1 l_single_C2_Skw   2 l_explicit_turbulent_adv_xpyp
+  !   3 l_upwind_xpyp_ta  4 l_min_xp2_from_corr_wx  5 l_C2_cloud_frac
+  !   6 l_hole_fill       7 l_tke_aniso
+  !   8 up2_vp2_sponge_damp_settings%l_sponge_damping (never assigned
+  !     in an EAM build -- static storage, gfortran zero-init = F)
+  subroutine drv_xp2_config(nz, nu2_out, nu9_out, iflags)
+    use grid_class, only: gr
+    use parameters_tunable, only: nu2_vert_res_dep, nu9_vert_res_dep
+    use model_flags, only: l_single_C2_Skw, &
+        l_explicit_turbulent_adv_xpyp, l_upwind_xpyp_ta, &
+        l_min_xp2_from_corr_wx, l_C2_cloud_frac, l_hole_fill, l_tke_aniso
+    use sponge_layer_damping, only: up2_vp2_sponge_damp_settings
+    integer, intent(in) :: nz
+    real(r8), intent(out) :: nu2_out(nz), nu9_out(nz)
+    integer, intent(out) :: iflags(8)
+    if (nz /= gr%nz) stop 'drv_xp2_config: nz mismatch'
+    nu2_out = nu2_vert_res_dep
+    nu9_out = nu9_vert_res_dep
+    iflags = 0
+    if (l_single_C2_Skw) iflags(1) = 1
+    if (l_explicit_turbulent_adv_xpyp) iflags(2) = 1
+    if (l_upwind_xpyp_ta) iflags(3) = 1
+    if (l_min_xp2_from_corr_wx) iflags(4) = 1
+    if (l_C2_cloud_frac) iflags(5) = 1
+    if (l_hole_fill) iflags(6) = 1
+    if (l_tke_aniso) iflags(7) = 1
+    if (up2_vp2_sponge_damp_settings%l_sponge_damping) iflags(8) = 1
+  end subroutine drv_xp2_config
+
+  !---------------------------------------------------------------------
+  ! The REAL (public) advance_xp2_xpyp, exactly as advance_clubb_core
+  ! calls it under the EAMv3 configuration: sclr_dim = 0 (all scalar
+  ! arguments are (nz,0)), l_iter = l_iter_xp2_xpyp = .true. (a
+  ! compile-time parameter in advance_clubb_core_module),
+  ! pdf_implicit_coefs_terms untouched on the compile-time iiPDF_ADG1
+  ! path (zero-filled here to keep it a deterministic local).
+  ! wprtp2/wpthlp2/wprtpthlp are unused under
+  ! l_explicit_turbulent_adv_xpyp=.false. but are real arguments.
+  subroutine drv_advance_xp2_xpyp(nz, dt, l_iter_in, tau_zm, wm_zm, &
+      rtm, wprtp, thlm, wpthlp, wpthvp, um, vm, wp2, wp2_zt, wp3, &
+      upwp, vpwp, sigma_sqd_w, skw_zm, wprtp2, wpthlp2, wprtpthlp, &
+      kh_zt, rtp2_forcing, thlp2_forcing, rtpthlp_forcing, rho_ds_zm, &
+      rho_ds_zt, invrs_rho_ds_zm, thv_ds_zm, cloud_frac, lscale, &
+      wp3_on_wp2, wp3_on_wp2_zt, wp2_splat, rtp2_in, thlp2_in, &
+      rtpthlp_in, up2_in, vp2_in, rtp2_out, thlp2_out, rtpthlp_out, &
+      up2_out, vp2_out, err_out)
+    use advance_xp2_xpyp_module, only: advance_xp2_xpyp
+    use pdf_parameter_module, only: implicit_coefs_terms
+    use error_code, only: err_code, clubb_no_error
+    integer, intent(in) :: nz
+    real(r8), intent(in) :: dt
+    logical, intent(in) :: l_iter_in
+    real(r8), intent(in), dimension(nz) :: tau_zm, wm_zm, rtm, wprtp, &
+        thlm, wpthlp, wpthvp, um, vm, wp2, wp2_zt, wp3, upwp, vpwp, &
+        sigma_sqd_w, skw_zm, wprtp2, wpthlp2, wprtpthlp, kh_zt, &
+        rtp2_forcing, thlp2_forcing, rtpthlp_forcing, rho_ds_zm, &
+        rho_ds_zt, invrs_rho_ds_zm, thv_ds_zm, cloud_frac, lscale, &
+        wp3_on_wp2, wp3_on_wp2_zt, wp2_splat
+    real(r8), intent(in), dimension(nz) :: rtp2_in, thlp2_in, &
+        rtpthlp_in, up2_in, vp2_in
+    real(r8), intent(out), dimension(nz) :: rtp2_out, thlp2_out, &
+        rtpthlp_out, up2_out, vp2_out
+    integer, intent(out) :: err_out
+
+    real(r8), dimension(nz) :: rtp2, thlp2, rtpthlp, up2, vp2
+    real(r8), dimension(nz, 0) :: sclrm, wpsclrp, wpsclrp2, &
+        wpsclrprtp, wpsclrpthlp, sclrp2, sclrprtp, sclrpthlp
+    type(implicit_coefs_terms), dimension(nz) :: pdf_ict
+    real(r8), parameter :: z = 0.0_r8
+
+    pdf_ict = implicit_coefs_terms(z, z, z, z, z, z, z, z, z)
+
+    rtp2 = rtp2_in
+    thlp2 = thlp2_in
+    rtpthlp = rtpthlp_in
+    up2 = up2_in
+    vp2 = vp2_in
+    err_code = clubb_no_error
+
+    call advance_xp2_xpyp( tau_zm, wm_zm, rtm, wprtp, thlm,        & ! In
+                           wpthlp, wpthvp, um, vm, wp2, wp2_zt,    & ! In
+                           wp3, upwp, vpwp, sigma_sqd_w, skw_zm,   & ! In
+                           wprtp2, wpthlp2, wprtpthlp,             & ! In
+                           kh_zt, rtp2_forcing, thlp2_forcing,     & ! In
+                           rtpthlp_forcing, rho_ds_zm, rho_ds_zt,  & ! In
+                           invrs_rho_ds_zm, thv_ds_zm, cloud_frac, & ! In
+                           lscale, wp3_on_wp2, wp3_on_wp2_zt,      & ! In
+                           pdf_ict,                                & ! In
+                           l_iter_in, dt,                          & ! In
+                           sclrm, wpsclrp,                         & ! In
+                           wpsclrp2, wpsclrprtp, wpsclrpthlp,      & ! In
+                           wp2_splat,                              & ! In
+                           rtp2, thlp2, rtpthlp, up2, vp2,         & ! Inout
+                           sclrp2, sclrprtp, sclrpthlp)              ! Inout
+
+    err_out = err_code
+    err_code = clubb_no_error
+
+    rtp2_out = rtp2
+    thlp2_out = thlp2
+    rtpthlp_out = rtpthlp
+    up2_out = up2
+    vp2_out = vp2
+  end subroutine drv_advance_xp2_xpyp
+
+  !---------------------------------------------------------------------
+  ! The REAL clip_covars_denom, exactly as advance_clubb_core calls it
+  ! after advance_xp2_xpyp (cl_num = 2/2/2/1/1 under EAMv3
+  ! l_predict_upwp_vpwp=F) and after advance_wp2_wp3 (3/3/3/2/2).
+  ! sclr_dim = 0; the pert pointers stay unassociated (as in EAM).
+  subroutine drv_clip_covars_denom(nz, dt, rtp2, thlp2, up2, vp2, &
+      wp2, wprtp_cl_num, wpthlp_cl_num, wpsclrp_cl_num, upwp_cl_num, &
+      vpwp_cl_num, wprtp_in, wpthlp_in, upwp_in, vpwp_in, &
+      wprtp_out, wpthlp_out, upwp_out, vpwp_out, err_out)
+    use clip_explicit, only: clip_covars_denom
+    use error_code, only: err_code, clubb_no_error
+    integer, intent(in) :: nz
+    real(r8), intent(in) :: dt
+    real(r8), intent(in), dimension(nz) :: rtp2, thlp2, up2, vp2, wp2
+    integer, intent(in) :: wprtp_cl_num, wpthlp_cl_num, &
+        wpsclrp_cl_num, upwp_cl_num, vpwp_cl_num
+    real(r8), intent(in), dimension(nz) :: wprtp_in, wpthlp_in, &
+        upwp_in, vpwp_in
+    real(r8), intent(out), dimension(nz) :: wprtp_out, wpthlp_out, &
+        upwp_out, vpwp_out
+    integer, intent(out) :: err_out
+
+    real(r8), dimension(nz) :: wprtp, wpthlp, upwp, vpwp
+    real(r8), dimension(nz, 0) :: sclrp2, wpsclrp
+    real(r8), pointer, dimension(:) :: upwp_pert => null(), &
+        vpwp_pert => null()
+
+    wprtp = wprtp_in
+    wpthlp = wpthlp_in
+    upwp = upwp_in
+    vpwp = vpwp_in
+    err_code = clubb_no_error
+
+    call clip_covars_denom( dt, rtp2, thlp2, up2, vp2, wp2,           & ! in
+                            sclrp2, wprtp_cl_num, wpthlp_cl_num,      & ! in
+                            wpsclrp_cl_num, upwp_cl_num, vpwp_cl_num, & ! in
+                            wprtp, wpthlp, upwp, vpwp, wpsclrp,       & ! i/o
+                            upwp_pert, vpwp_pert )                      ! i/o
+
+    err_out = err_code
+    err_code = clubb_no_error
+
+    wprtp_out = wprtp
+    wpthlp_out = wpthlp
+    upwp_out = upwp
+    vpwp_out = vpwp
+  end subroutine drv_clip_covars_denom
 
 end module clubb_driver

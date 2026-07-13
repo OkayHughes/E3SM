@@ -1,4 +1,4 @@
-"""JAX port of EAMv3 CLUBB — slices A and B (see PORTING_PLAN.md
+"""JAX port of EAMv3 CLUBB — slices A, B and C (see PORTING_PLAN.md
 row 12).
 
 Delivered so far, all validated against the eam_clubb_f f2py harness
@@ -37,6 +37,19 @@ compiled with EAM's defines -DCLUBB_CAM -DCLUBB_SGS
                   ipdf_call_placement=2 puts the pdf call last, so its
                   outputs pass through untouched).
 
+- advance_xp2_xpyp.py  (slice C) the prognostic advance of rt'2,
+                  thl'2, rt'thl', u'2, v'2: ADG1 semi-implicit
+                  "upwind" turbulent advection, eddy diffusion +
+                  mean advection + C2/tau dissipation tridiagonal
+                  solves (slice A's exact dgtsv port), the up2/vp2
+                  pressure terms pr1/pr2 and wp2_splat gustiness,
+                  positive-definite hole filling
+                  (fill_holes_vertical, "zm" path), tolerance /
+                  large-rtp2 / 1000 m2s-2 clipping, rtpthlp
+                  correlation clipping, and clip_covars_denom (the
+                  post-advance wprtp/wpthlp/upwp/vpwp correlation
+                  clip, l_tke_aniso=T).
+
 EAM configuration baked into the port scope (all verbatim from
 clubb_intr.F90 + model_flags.F90 defaults; goldens use the same):
 sclr_dim=0, hydromet_dim=0, iiPDF_type=iiPDF_ADG1 (compile-time),
@@ -52,5 +65,5 @@ coupling read_parameters applies); the goldens record the full packed
 params vector.
 """
 
-from . import (grid, pdf_closure, pdf_closure_driver,  # noqa: F401
-               saturation, tridiag)
+from . import (advance_xp2_xpyp, grid, pdf_closure,  # noqa: F401
+               pdf_closure_driver, saturation, tridiag)

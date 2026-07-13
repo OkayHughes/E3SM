@@ -39,6 +39,11 @@ EPS = 1.0e-10           # smallest divide-guard
 MAX_NUM_STDEVS = 5.0    # range of stdevs for statistical significance
 ZERO_THRESHOLD = 0.0
 MAX_MAG_CORRELATION = 0.99
+MAX_MAG_CORRELATION_FLUX = 0.99   # special for wprtp and wpthlp
+
+# "Over-implicit" time-step weight for the semi-implicit terms in the
+# predictive variance/covariance equations (constants_clubb.F90 ~l115).
+GAMMA_OVER_IMPLICIT_TS = 1.5
 
 # Fortran epsilon(1.0_core_rknd) for double precision (clip_rcm uses
 # rtm - epsilon(rtm)); 2**-52.

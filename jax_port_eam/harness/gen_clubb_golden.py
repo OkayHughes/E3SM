@@ -45,8 +45,24 @@ see build_clubb.py) exactly as EAM does and records golden archives:
                                 call last, so its outputs reach the
                                 caller untouched).
 
+  golden/clubb_xp2.npz          (slice C) the REAL public
+                                advance_xp2_xpyp driven directly (40
+                                cases: 16 whose prognostic moments are
+                                REAL advance_clubb_core-advanced states
+                                + 24 synthetic stress columns hitting
+                                every clip: rt_tol^2/thl_tol^2 floors,
+                                the 0.5*rtm^2 rtp2 cap, the 1000 up2/
+                                vp2 cap, Cauchy-Schwarz rtpthlp
+                                clipping, hole-filling via strongly
+                                negative forcings, both upwind-ta signs
+                                via wp3_on_wp2 sign structure), plus
+                                clip_covars_denom cases (post-xp2
+                                covariance clipping, l_tke_aniso=T)
+                                and the nu2/nu9_vert_res_dep profiles
+                                + model-flag configuration.
+
 Run `python3 gen_clubb_golden.py [archive ...]` with archive names
-(grid/tridag/sat/pdf_closure/pdf_driver) to regenerate a subset;
+(grid/tridag/sat/pdf_closure/pdf_driver/xp2) to regenerate a subset;
 no arguments regenerates everything.
 
 EAMv3 tunable parameters: CLUBB compiled-in defaults from the real
@@ -80,16 +96,29 @@ IDX_NAMES = ["C1", "C1b", "C1c", "C2rt", "C2thl", "C2rtthl", "C6rt",
              "Skw_denom_coef", "Skw_max_mag"]
 
 # EAMv3 phys="default" clubb_param_nl values
-# (bld/namelist_files/namelist_defaults_eam.xml; clubb_wpxp_L_thresh
-# is the general default at line 871).  clubb_C2rt=1.75 triggers the
-# read_parameters coupling C2thl=C2rt, C2rtthl=1.3*C2rt.
+# (bld/namelist_files/namelist_defaults_eam.xml).  clubb_C2rt=1.75
+# triggers the read_parameters coupling C2thl=C2rt, C2rtthl=1.3*C2rt.
+# CORRECTIONS in slice C (none affects the outputs of the earlier
+# archives -- pdf_closure/pdf_closure_driver read none of these):
+#   - C14 = 2.5 (namelist_defaults line ~1968, phys="default"; the
+#     CLUBB compiled-in default is 1.0).  advance_xp2_xpyp uses C14
+#     in the up2/vp2 dp1/pr1 terms, so slice C REQUIRES it.
+#   - c_K10 = c_K10h = 0.35 (lines ~2000-2001; defaults 0.6/1.0);
+#     first used by the Kh computation (slice D).
+#   - wpxp_L_thresh = 100.0, NOT the generic 60.0: build-namelist's
+#     defaults lookup is case-INsensitive (Build::NamelistDefaults
+#     get_value lc()'s the name), so the <clubb_wpxp_l_thresh
+#     phys="default"> 100.0 entry at line ~2006 beats the
+#     attribute-less 60.0 at line 871.  First used by advance_xm_wpxp
+#     (slice E).
 EAMV3_OVERRIDES = {
     "C1": 2.4, "C1b": 2.8, "C1c": 0.75,
     "C2rt": 1.75, "C2thl": 1.75, "C2rtthl": 1.75 * 1.3,
     "C6rtb": 7.50, "C6rtc": 0.50, "C6thlb": 7.50, "C6thlc": 0.50,
-    "C8": 5.2, "C11": 0.70, "C11b": 0.20, "C11c": 0.85,
+    "C8": 5.2, "C11": 0.70, "C11b": 0.20, "C11c": 0.85, "C14": 2.5,
     "gamma_coef": 0.12, "gamma_coefb": 0.28, "gamma_coefc": 1.2,
-    "mu": 0.0005, "wpxp_L_thresh": 60.0,
+    "mu": 0.0005, "c_K10": 0.35, "c_K10h": 0.35,
+    "wpxp_L_thresh": 100.0,
 }
 
 
@@ -656,8 +685,362 @@ def gen_pdf_driver(params, idx):
     return out
 
 
+# ---------------------------------------------------------------------------
+# Slice C: advance_xp2_xpyp + clip_covars_denom
+# ---------------------------------------------------------------------------
+
+XP2_IDX_NAMES = ["C4", "C5", "C14", "c_K2", "c_K9", "nu2", "nu9"]
+
+# Everything advance_xp2_xpyp takes, on its native grid (zm = momentum,
+# zt = thermodynamic).  wprtp2/wpthlp2/wprtpthlp are real arguments but
+# UNUSED under EAMv3 (l_explicit_turbulent_adv_xpyp=F); recorded as
+# zeros.  skw_zm and cloud_frac are likewise dead (l_single_C2_Skw=F,
+# l_C2_cloud_frac=F) but recorded with consistent values.
+XP2_INPUTS = ["tau_zm", "wm_zm", "rtm", "wprtp", "thlm", "wpthlp",
+              "wpthvp", "um", "vm", "wp2", "wp2_zt", "wp3", "upwp",
+              "vpwp", "sigma_sqd_w", "skw_zm", "wprtp2", "wpthlp2",
+              "wprtpthlp", "kh_zt", "rtp2_forcing", "thlp2_forcing",
+              "rtpthlp_forcing", "rho_ds_zm", "rho_ds_zt",
+              "invrs_rho_ds_zm", "thv_ds_zm", "cloud_frac", "lscale",
+              "wp3_on_wp2", "wp3_on_wp2_zt", "wp2_splat",
+              "rtp2", "thlp2", "rtpthlp", "up2", "vp2"]
+
+XP2_PROG = ["rtp2", "thlp2", "rtpthlp", "up2", "vp2"]
+
+W_TOL_SQD = 4.0e-4
+RT_TOL = 1.0e-8
+THL_TOL = 1.0e-2
+
+
+def _zt2zm_f(azt, nz):
+    return d.drv_grid_ops(azt, np.zeros(nz))[0]
+
+
+def _zm2zt_f(azm, nz):
+    return d.drv_grid_ops(np.zeros(nz), azm)[1]
+
+
+def _xp2_env(nz, z_t, z_m, rng):
+    """Plausible thermodynamic environment + tau/Kh/Lscale profiles
+    (inputs to advance_xp2_xpyp that its validation replays verbatim;
+    physical consistency only sets regime coverage)."""
+    h = rng.uniform(7000.0, 8500.0)
+    p = 1.0e5 * np.exp(-z_t / h)
+    p[0] = p[1]
+    exner = (p / 1.0e5) ** (287.042 / 1004.64)
+    t_sfc = rng.uniform(275.0, 302.0)
+    T = np.maximum(t_sfc - rng.uniform(0.005, 0.0075) * z_t, 195.0)
+    thlm = T / exner
+    rsl, _ = d.drv_sat(p, T)
+    rtm = np.clip(rng.uniform(0.3, 1.05) * rsl, 1e-7, 0.025)
+    rho_ds_zt = p / (287.042 * T)
+    rho_ds_zt[0] = rho_ds_zt[1]
+    rho_ds_zm = _interp_zm(z_m, z_t, rho_ds_zt)
+    zpbl = rng.uniform(800.0, 2500.0)
+    bl_m = np.exp(-z_m / zpbl)
+    bl_t = np.exp(-z_t / zpbl)
+    tau_zm = rng.uniform(50.0, 400.0) + rng.uniform(400.0, 3000.0) * (
+        1.0 - np.exp(-z_m / 1500.0))
+    kh_zt = rng.uniform(1.0, 80.0) * bl_t + 0.1
+    lscale = rng.uniform(30.0, 1200.0) * bl_t + 10.0
+    um = 5.0 + 10.0 * np.tanh(z_t / 3000.0) + rng.normal(0, 2)
+    vm = -3.0 + rng.normal(0, 2) * bl_t
+    wm_zm = rng.normal(0.0, 0.02) * bl_m
+    return dict(p=p, thlm=thlm, rtm=rtm, rho_ds_zt=rho_ds_zt,
+                rho_ds_zm=rho_ds_zm, bl_m=bl_m, bl_t=bl_t,
+                tau_zm=tau_zm, kh_zt=kh_zt, lscale=lscale, um=um,
+                vm=vm, wm_zm=wm_zm)
+
+
+def _finish_xp2_case(nz, env, wp2, wp3, moments, rng):
+    """Assemble the full advance_xp2_xpyp input dict from an
+    environment, wp2/wp3, and the second-moment dict."""
+    wp2 = np.maximum(wp2, W_TOL_SQD)
+    wp2_zt = np.maximum(_zm2zt_f(wp2, nz), W_TOL_SQD)
+    wp3_zm = _zt2zm_f(wp3, nz)
+    wp3_on_wp2_zt = wp3 / wp2_zt
+    wp3_on_wp2 = wp3_zm / wp2
+    skw_zm = d.drv_skx(wp2, wp3_zm, 2.0e-2)
+    gam = 0.28 + (0.12 - 0.28) * np.exp(-0.5 * (skw_zm / 1.2) ** 2)
+    sig = d.drv_sigma_sqd_w(
+        gam, wp2, moments["thlp2"], moments["rtp2"], moments["up2"],
+        moments["vp2"], moments["wpthlp"], moments["wprtp"],
+        moments["upwp"], moments["vpwp"])
+    case = dict(
+        tau_zm=env["tau_zm"], wm_zm=env["wm_zm"], rtm=env["rtm"],
+        thlm=env["thlm"], um=env["um"], vm=env["vm"],
+        wp2=wp2, wp2_zt=wp2_zt, wp3=wp3, sigma_sqd_w=sig,
+        skw_zm=skw_zm, wprtp2=np.zeros(nz), wpthlp2=np.zeros(nz),
+        wprtpthlp=np.zeros(nz), kh_zt=env["kh_zt"],
+        rtp2_forcing=np.zeros(nz), thlp2_forcing=np.zeros(nz),
+        rtpthlp_forcing=np.zeros(nz), rho_ds_zm=env["rho_ds_zm"],
+        rho_ds_zt=env["rho_ds_zt"],
+        invrs_rho_ds_zm=1.0 / env["rho_ds_zm"],
+        thv_ds_zm=_interp_zm(np.maximum(env.get("z_m"), 0.0),
+                             np.maximum(env.get("z_t"), 0.0),
+                             env["thlm"]),
+        cloud_frac=env.get("cloud_frac", np.zeros(nz)),
+        lscale=env["lscale"], wp3_on_wp2=wp3_on_wp2,
+        wp3_on_wp2_zt=wp3_on_wp2_zt, wp2_splat=np.zeros(nz),
+        **{k: moments[k] for k in ["wprtp", "wpthlp", "wpthvp",
+                                   "upwp", "vpwp", "rtp2", "thlp2",
+                                   "rtpthlp", "up2", "vp2"]})
+    del rng
+    return case
+
+
+def _build_xp2_synthetic(nz, zt, zm, rng, ncase=24):
+    """Synthetic stress columns for advance_xp2_xpyp."""
+    z_t = np.maximum(zt, 0.0)
+    z_m = np.maximum(zm, 0.0)
+    cases = []
+    for c in range(ncase):
+        fam = c % 8
+        env = _xp2_env(nz, z_t, z_m, rng)
+        env["z_t"], env["z_m"] = z_t, z_m
+        bl_m, bl_t = env["bl_m"], env["bl_t"]
+        rtm_m = _interp_zm(z_m, z_t, env["rtm"])
+
+        wp2 = rng.uniform(0.2, 0.8) * bl_m + 1e-3
+        skw_t = rng.normal(0.0, 1.0, nz) * bl_t
+        rtp2 = (rng.uniform(0.05, 0.25) * rtm_m) ** 2 * bl_m + 1e-14
+        thlp2 = rng.uniform(0.1, 1.0) ** 2 * bl_m + 1e-6
+        up2 = rng.uniform(0.05, 0.6) * bl_m + 1e-4
+        vp2 = rng.uniform(0.05, 0.6) * bl_m + 1e-4
+        corr = lambda lo, hi: rng.uniform(lo, hi, nz)  # noqa: E731
+
+        if fam == 0:
+            # degenerate variances: every floor clip + dp1 threshold
+            wp2 = np.full(nz, W_TOL_SQD)
+            rtp2 = np.full(nz, 1e-18)
+            thlp2 = np.full(nz, 1e-9)
+            up2 = np.full(nz, 1e-6)
+            vp2 = np.full(nz, 1e-6)
+            skw_t = np.zeros(nz)
+        elif fam == 1:
+            # Cauchy-Schwarz-violating rtpthlp (clip_covar) and
+            # correlation-violating fluxes (clip_covars_denom bait)
+            pass  # handled below via corr multipliers
+        elif fam == 2:
+            # strong skewness, sign-alternating wp3 (both upwind arms)
+            skw_t = 3.5 * np.sign(np.sin(z_t / 900.0)) * bl_t \
+                + rng.normal(0.0, 0.3, nz) * bl_t
+        elif fam == 3:
+            # large rtp2 above the 0.5*rtm^2 cap + positive forcing
+            rtp2 = (0.9 * rtm_m) ** 2 + 1e-14
+        elif fam == 4:
+            # near/above the 1000 m2/s2 up2/vp2 cap + strong shear
+            up2 = 900.0 + 600.0 * bl_m
+            vp2 = 800.0 + 500.0 * bl_m
+            wp2 = 1.5 * bl_m + 1e-3
+            env["um"] = env["um"] + 25.0 * np.tanh((z_t - 1500.0) / 300.0)
+        elif fam == 5:
+            # hole bait: strongly negative forcings drive the solution
+            # negative in a band -> pos_definite_variances fires
+            pass  # forcings set below
+        elif fam == 6:
+            # advection/dissipation heavy
+            env["wm_zm"] = 0.2 * np.sin(z_m / 2500.0)
+            env["tau_zm"] = np.full(nz, rng.uniform(20.0, 60.0))
+            env["kh_zt"] = np.full(nz, rng.uniform(80.0, 200.0))
+        # fam 7: randomized defaults above
+
+        wp3 = skw_t * np.maximum(_zm2zt_f(wp2, nz), W_TOL_SQD) ** 1.5
+
+        cw = 2.5 if fam == 1 else 0.9
+        moments = dict(
+            rtp2=rtp2, thlp2=thlp2, up2=up2, vp2=vp2,
+            rtpthlp=(corr(-cw, cw) if fam != 1 else
+                     np.where(np.arange(nz) % 2 == 0, 2.5, -2.5))
+            * np.sqrt(rtp2 * thlp2),
+            wprtp=corr(-0.7, 0.9) * np.sqrt(wp2 * rtp2)
+            * (1.6 if fam == 1 else 1.0),
+            wpthlp=corr(-0.9, 0.7) * np.sqrt(wp2 * thlp2)
+            * (1.6 if fam == 1 else 1.0),
+            upwp=corr(-0.6, 0.6) * np.sqrt(wp2 * up2)
+            * (1.8 if fam == 1 else 1.0),
+            vpwp=corr(-0.6, 0.6) * np.sqrt(wp2 * vp2)
+            * (1.8 if fam == 1 else 1.0),
+            wpthvp=rng.normal(0.0, 0.05, nz) * bl_m)
+
+        case = _finish_xp2_case(nz, env, wp2, wp3, moments, rng)
+
+        if fam == 3:
+            case["rtp2_forcing"] = 5e-9 * bl_m
+        if fam == 5:
+            band = np.exp(-((z_m - 2000.0) / 500.0) ** 2)
+            case["rtp2_forcing"] = -3.0 * case["rtp2"] / DT_EAMV3 * band
+            case["thlp2_forcing"] = -3.0 * case["thlp2"] / DT_EAMV3 * band
+            case["rtpthlp_forcing"] = 2.0 * case["rtpthlp"] / DT_EAMV3 \
+                * band
+        if fam == 4:
+            case["wp2_splat"] = -0.02 * case["wp2"] / DT_EAMV3
+        cases.append(case)
+    return cases
+
+
+def _build_xp2_adv(nz, zt, zm, rng, nadv=16):
+    """Realistic cases: prognostic moments and Kh from REAL one-step
+    advance_clubb_core-advanced states of the slice-B regime columns
+    (tau/Lscale profiles are plausible synthetics -- their computation
+    is slice D; advance_xp2_xpyp validation replays whatever it is
+    fed)."""
+    z_t = np.maximum(zt, 0.0)
+    z_m = np.maximum(zm, 0.0)
+    cols = _build_driver_columns(nz, zt, zm, rng)
+    ned = 29
+    zero = np.zeros(nz)
+    cases = []
+    for c in range(nadv):
+        p = cols["p"][c]
+        exner = cols["exner"][c]
+        T = cols["thlm"][c] * exner
+        rho_t = p / (287.042 * T)
+        rho_ds_zt = rho_t.copy()
+        rho_ds_zt[0] = rho_ds_zt[1]
+        rho_ds_zm = _interp_zm(z_m, z_t, rho_ds_zt)
+        prog_in = np.column_stack(
+            [cols["um"][c], cols["vm"][c], cols["upwp"][c],
+             cols["vpwp"][c], cols["up2"][c], cols["vp2"][c],
+             cols["thlm"][c], cols["rtm"][c], cols["wprtp"][c],
+             cols["wpthlp"][c], cols["wp2"][c], cols["wp3"][c],
+             cols["rtp2"][c], cols["rtp3"][c], cols["thlp2"][c],
+             cols["thlp3"][c], cols["rtpthlp"][c]]
+            + [np.zeros(nz)] * 6)
+        edsclr_in = np.zeros((nz, ned))
+        for jj in range(ned):
+            edsclr_in[:, jj] = (1.0 + 0.1 * jj) * np.exp(
+                -z_t / (2000.0 + 300.0 * jj))
+        edsclr_in[0, :] = edsclr_in[1, :]
+        prog_out, _eds, diag, _pz, _pm, aerr = d.drv_advance_clubb_core(
+            DT_EAMV3, 1.0e-4, 0.0, 0.02, 5e-5, -0.05, 0.02,
+            100000.0, 100000.0,
+            zero, zero, zero, zero, zero, zero, zero, zero, zero,
+            cols["wm_zm"][c], cols["wm_zt"][c], p, rho_ds_zm, rho_t,
+            exner, rho_ds_zm, rho_ds_zt, 1.0 / rho_ds_zm,
+            1.0 / rho_ds_zt, cols["thv_ds_zm"][c], cols["thv_ds_zt"][c],
+            cols["rfrzm"][c], zero, prog_in, edsclr_in)
+        assert aerr == 0, (c, aerr)
+
+        env = _xp2_env(nz, z_t, z_m, rng)
+        env["z_t"], env["z_m"] = z_t, z_m
+        # replace environment pieces with the real column/advanced state
+        env["thlm"] = prog_out[:, 6]
+        env["rtm"] = prog_out[:, 7]
+        env["um"] = prog_out[:, 0]
+        env["vm"] = prog_out[:, 1]
+        env["rho_ds_zt"] = rho_ds_zt
+        env["rho_ds_zm"] = rho_ds_zm
+        env["wm_zm"] = cols["wm_zm"][c]
+        env["kh_zt"] = np.maximum(diag[:, 1], 0.0) + 0.1  # real khzt
+        env["cloud_frac"] = prog_out[:, 18]
+        moments = dict(
+            rtp2=prog_out[:, 12], thlp2=prog_out[:, 14],
+            rtpthlp=prog_out[:, 16], up2=prog_out[:, 4],
+            vp2=prog_out[:, 5], wprtp=prog_out[:, 8],
+            wpthlp=prog_out[:, 9], upwp=prog_out[:, 2],
+            vpwp=prog_out[:, 3], wpthvp=prog_out[:, 19])
+        cases.append(_finish_xp2_case(nz, env, prog_out[:, 10],
+                                      prog_out[:, 11], moments, rng))
+    return cases
+
+
+def _run_xp2(case):
+    args = [case[k] for k in XP2_INPUTS]
+    return d.drv_advance_xp2_xpyp(DT_EAMV3, True, *args)
+
+
+def gen_xp2(params, idx):
+    zi, zt = eam_like_grid(73)
+    nz = zi.size
+    err = d.drv_setup(29, params, zi, zt)
+    assert err == 0
+    d.drv_set_eam_flags(2, True)
+
+    nu2, nu9, iflags = d.drv_xp2_config(nz)
+    # EAMv3 model_flags configuration (see drv_xp2_config for slots):
+    # l_single_C2_Skw=F, l_explicit_turbulent_adv_xpyp=F,
+    # l_upwind_xpyp_ta=T, l_min_xp2_from_corr_wx=F, l_C2_cloud_frac=F,
+    # l_hole_fill=T, l_tke_aniso=T, up2_vp2 sponge damping OFF.
+    assert list(iflags) == [0, 0, 1, 0, 0, 1, 1, 0], list(iflags)
+
+    rng = np.random.default_rng(20260713)
+    cases = _build_xp2_adv(nz, zt, zi, rng) \
+        + _build_xp2_synthetic(nz, zt, zi, rng)
+    ncase = len(cases)
+
+    ins = {k: np.zeros((ncase, nz)) for k in XP2_INPUTS}
+    outs = {k: np.zeros((ncase, nz)) for k in XP2_PROG}
+    for c, case in enumerate(cases):
+        for k in XP2_INPUTS:
+            ins[k][c] = case[k]
+        r2, t2, rt, u2, v2, xerr = _run_xp2(case)
+        assert xerr == 0, (c, xerr)
+        outs["rtp2"][c] = r2
+        outs["thlp2"][c] = t2
+        outs["rtpthlp"][c] = rt
+        outs["up2"][c] = u2
+        outs["vp2"][c] = v2
+
+    # ---- branch-coverage sanity ----
+    assert (outs["rtp2"] == RT_TOL ** 2).any()            # floor clip
+    assert (outs["thlp2"] == THL_TOL ** 2).any()          # floor clip
+    assert (outs["up2"] == 1000.0).any()                  # magnitude cap
+    cap = 0.5 * ins["rtm"] ** 2
+    assert (outs["rtp2"] == cap).any()                    # l_clip_large_rtp2
+    bound = 0.99 * np.sqrt(outs["rtp2"] * outs["thlp2"])
+    at_bound = np.isclose(np.abs(outs["rtpthlp"]), bound, rtol=1e-14) \
+        & (bound > 0)
+    assert at_bound.any()                                 # clip_covar
+    print(f"xp2 coverage: rtp2 floor {(outs['rtp2'] == RT_TOL**2).sum()}, "
+          f"cap {(outs['rtp2'] == cap).sum()}, "
+          f"up2 cap {(outs['up2'] == 1000.0).sum()}, "
+          f"rtpthlp clipped {at_bound.sum()}")
+
+    # ---- clip_covars_denom (post-xp2 instance: cl_num 2/2/2/1/1; the
+    # cl_num values only gate stats, which are off) ----
+    cc_ins = {k: np.zeros((ncase, nz)) for k in
+              ["wp2", "rtp2", "thlp2", "up2", "vp2", "wprtp", "wpthlp",
+               "upwp", "vpwp"]}
+    cc_outs = {k: np.zeros((ncase, nz)) for k in
+               ["wprtp", "wpthlp", "upwp", "vpwp"]}
+    for c, case in enumerate(cases):
+        cc = dict(wp2=case["wp2"], rtp2=outs["rtp2"][c],
+                  thlp2=outs["thlp2"][c], up2=outs["up2"][c],
+                  vp2=outs["vp2"][c], wprtp=case["wprtp"],
+                  wpthlp=case["wpthlp"], upwp=case["upwp"],
+                  vpwp=case["vpwp"])
+        wr, wt, uw, vw, cerr = d.drv_clip_covars_denom(
+            DT_EAMV3, cc["rtp2"], cc["thlp2"], cc["up2"], cc["vp2"],
+            cc["wp2"], 2, 2, 2, 1, 1, cc["wprtp"], cc["wpthlp"],
+            cc["upwp"], cc["vpwp"])
+        assert cerr == 0, (c, cerr)
+        for k in cc_ins:
+            cc_ins[k][c] = cc[k]
+        cc_outs["wprtp"][c] = wr
+        cc_outs["wpthlp"][c] = wt
+        cc_outs["upwp"][c] = uw
+        cc_outs["vpwp"][c] = vw
+    nchanged = sum((cc_outs[k] != cc_ins[k]).any(axis=1).sum()
+                   for k in cc_outs)
+    assert nchanged > 10, nchanged  # clipping must actually fire
+    print(f"clip_covars_denom coverage: {nchanged} clipped columns")
+
+    out = {f"in_{k}": v for k, v in ins.items()}
+    out.update({f"out_{k}": v for k, v in outs.items()})
+    out.update({f"cc_in_{k}": v for k, v in cc_ins.items()})
+    out.update({f"cc_out_{k}": v for k, v in cc_outs.items()})
+    out.update(zi=zi, zt=zt, dt=np.array(DT_EAMV3),
+               nu2_vert_res_dep=nu2, nu9_vert_res_dep=nu9,
+               xp2_flags=np.asarray(iflags),
+               nadv=np.array(16))
+    return out
+
+
 def main(which=None):
     params, idx = eamv3_params()
+    xp2_idx = {n: int(i) - 1 for n, i in
+               zip(XP2_IDX_NAMES, d.drv_param_indices_xp2())}
     sha = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"],
                          capture_output=True, text=True).stdout.strip()
     meta = dict(
@@ -668,6 +1051,15 @@ def main(which=None):
         lapack="Ubuntu reference liblapack (container)",
         eamv3_overrides=EAMV3_OVERRIDES,
         param_indices={k: int(v) for k, v in idx.items()},
+        xp2_param_indices=xp2_idx,
+        xp2_config=dict(l_iter_xp2_xpyp=True, l_single_C2_Skw=False,
+                        l_explicit_turbulent_adv_xpyp=False,
+                        l_upwind_xpyp_ta=True,
+                        l_min_xp2_from_corr_wx=False,
+                        l_C2_cloud_frac=False, l_hole_fill=True,
+                        l_tke_aniso=True, l_up2_vp2_sponge_damp=False,
+                        l_clip_large_rtp2=True, rtp2_clip_coef=0.5,
+                        gamma_over_implicit_ts=1.5),
         config=dict(grid_type=3, l_implemented=True, sclr_dim=0,
                     hydromet_dim=0, edsclr_dim=29, theta0=300.0,
                     ts_nudge=86400.0, saturation_formula="flatau",
@@ -688,6 +1080,7 @@ def main(which=None):
         "sat": lambda: gen_sat(),
         "pdf_closure": lambda: gen_pdf_closure(params, idx),
         "pdf_driver": lambda: gen_pdf_driver(params, idx),
+        "xp2": lambda: gen_xp2(params, idx),
     }
     for name in (which or gens):
         np.savez_compressed(GOLDEN / f"clubb_{name}.npz", meta=meta_s,
