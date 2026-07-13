@@ -1200,4 +1200,255 @@ contains
     sfc(6) = rtpthlp_1
   end subroutine drv_lscale_tau_segment
 
+  !---------------------------------------------------------------------
+  ! Slice E: advance_xm_wpxp ---------------------------------------------
+  ! 1-based indices into params for the additional tunables
+  ! advance_xm_wpxp reads (C6rt/C6rtb/C6rtc/C6thl*/C7/C7b/wpxp_L_thresh/
+  ! altitude_threshold are already in drv_param_indices).
+  subroutine drv_param_indices_xm_wpxp(idx)
+    use parameter_indices, only: iC7c, ic_K6, inu6, &
+        iC6rt_Lscale0, iC6thl_Lscale0, iC7_Lscale0
+    integer, intent(out) :: idx(6)
+    idx = (/ iC7c, ic_K6, inu6, iC6rt_Lscale0, iC6thl_Lscale0, &
+             iC7_Lscale0 /)
+  end subroutine drv_param_indices_xm_wpxp
+
+  ! Model-flag / module-state configuration advance_xm_wpxp reads.
+  ! iflags:
+  !   1 l_clip_semi_implicit          2 l_explicit_turbulent_adv_wpxp
+  !   3 l_upwind_wpxp_ta              4 l_predict_upwp_vpwp
+  !   5 l_uv_nudge                    6 l_pos_def
+  !   7 l_hole_fill                   8 l_clip_turb_adv
+  !   9 l_diffuse_rtm_and_thlm       10 l_stability_correct_Kh_N2_zm
+  !  11 rtm_sponge_damp_settings%l_sponge_damping   (zero-init in EAM)
+  !  12 thlm_sponge_damp_settings%l_sponge_damping  (zero-init in EAM)
+  !  13 l_tke_aniso
+  subroutine drv_xm_wpxp_config(nz, nu6_out, iflags)
+    use grid_class, only: gr
+    use parameters_tunable, only: nu6_vert_res_dep
+    use model_flags, only: l_clip_semi_implicit, &
+        l_explicit_turbulent_adv_wpxp, l_upwind_wpxp_ta, &
+        l_predict_upwp_vpwp, l_uv_nudge, l_pos_def, l_hole_fill, &
+        l_clip_turb_adv, l_diffuse_rtm_and_thlm, &
+        l_stability_correct_Kh_N2_zm, l_tke_aniso
+    use sponge_layer_damping, only: rtm_sponge_damp_settings, &
+        thlm_sponge_damp_settings
+    integer, intent(in) :: nz
+    real(r8), intent(out) :: nu6_out(nz)
+    integer, intent(out) :: iflags(13)
+    if (nz /= gr%nz) stop 'drv_xm_wpxp_config: nz mismatch'
+    nu6_out = nu6_vert_res_dep
+    iflags = 0
+    if (l_clip_semi_implicit) iflags(1) = 1
+    if (l_explicit_turbulent_adv_wpxp) iflags(2) = 1
+    if (l_upwind_wpxp_ta) iflags(3) = 1
+    if (l_predict_upwp_vpwp) iflags(4) = 1
+    if (l_uv_nudge) iflags(5) = 1
+    if (l_pos_def) iflags(6) = 1
+    if (l_hole_fill) iflags(7) = 1
+    if (l_clip_turb_adv) iflags(8) = 1
+    if (l_diffuse_rtm_and_thlm) iflags(9) = 1
+    if (l_stability_correct_Kh_N2_zm) iflags(10) = 1
+    if (rtm_sponge_damp_settings%l_sponge_damping) iflags(11) = 1
+    if (thlm_sponge_damp_settings%l_sponge_damping) iflags(12) = 1
+    if (l_tke_aniso) iflags(13) = 1
+  end subroutine drv_xm_wpxp_config
+
+  !---------------------------------------------------------------------
+  ! CLUBB's LAPACK band-diagonal wrapper (band_solve -> dgbsv), exactly
+  ! as xm_wpxp_solve calls it (nsup=nsub=2).  lhs is in CLUBB's
+  ! row-oriented band storage (nsup+nsub+1, ndim): lhs(3,i) is the main
+  ! diagonal of equation i, lhs(1:2,i) couple variables i+2/i+1,
+  ! lhs(4:5,i) couple variables i-1/i-2.  rhs copied (dgbsv overwrites).
+  subroutine drv_band_solve(ndim, nrhs, lhs, rhs, solution, err_out)
+    use lapack_wrap, only: band_solve
+    use error_code, only: err_code, clubb_no_error
+    integer, intent(in) :: ndim, nrhs
+    real(r8), intent(in) :: lhs(5, ndim)
+    real(r8), intent(in) :: rhs(ndim, nrhs)
+    real(r8), intent(out) :: solution(ndim, nrhs)
+    integer, intent(out) :: err_out
+    real(r8) :: rhs_c(ndim, nrhs)
+    rhs_c = rhs
+    err_code = clubb_no_error
+    call band_solve("drv_band", 2, 2, ndim, nrhs, lhs, rhs_c, solution)
+    err_out = err_code
+    err_code = clubb_no_error
+  end subroutine drv_band_solve
+
+  !---------------------------------------------------------------------
+  ! The REAL (public) calc_turb_adv_range (mono_flux_limiter.F90):
+  ! turbulent-advection level-range for the monotonic flux limiter
+  ! (l_constant_thickness=.false. compile-time path, driven by the
+  ! zm-level PDF component means/variances).
+  subroutine drv_calc_turb_adv_range(nz, dt, w_1_zm, w_2_zm, &
+      varnce_w_1_zm, varnce_w_2_zm, mixt_frac_zm, low_lev, high_lev)
+    use grid_class, only: gr
+    use mono_flux_limiter, only: calc_turb_adv_range
+    integer, intent(in) :: nz
+    real(r8), intent(in) :: dt
+    real(r8), intent(in), dimension(nz) :: w_1_zm, w_2_zm, &
+        varnce_w_1_zm, varnce_w_2_zm, mixt_frac_zm
+    integer, intent(out), dimension(nz) :: low_lev, high_lev
+    if (nz /= gr%nz) stop 'drv_calc_turb_adv_range: nz mismatch'
+    call calc_turb_adv_range( dt, w_1_zm, w_2_zm, varnce_w_1_zm, &
+                              varnce_w_2_zm, mixt_frac_zm, &
+                              low_lev, high_lev )
+  end subroutine drv_calc_turb_adv_range
+
+  !---------------------------------------------------------------------
+  ! The REAL (public) monotonic_turbulent_flux_limit, exactly as
+  ! xm_wpxp_clipping_and_stats calls it (l_implemented=.true.,
+  ! l_mfl_xm_imp_adj=.true. compile-time).  solve_type: 1=thlm, 2=rtm.
+  subroutine drv_mono_flux_limiter(nz, solve_type, dt, xm_old, xp2, &
+      wm_zt, xm_forcing, rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm, &
+      invrs_rho_ds_zt, xp2_threshold, xm_tol, low_lev, high_lev, &
+      xm_in, wpxp_in, xm_out, wpxp_out, err_out)
+    use grid_class, only: gr
+    use mono_flux_limiter, only: monotonic_turbulent_flux_limit
+    use error_code, only: err_code, clubb_no_error
+    integer, intent(in) :: nz, solve_type
+    real(r8), intent(in) :: dt, xp2_threshold, xm_tol
+    real(r8), intent(in), dimension(nz) :: xm_old, xp2, wm_zt, &
+        xm_forcing, rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm, &
+        invrs_rho_ds_zt
+    integer, intent(in), dimension(nz) :: low_lev, high_lev
+    real(r8), intent(in), dimension(nz) :: xm_in, wpxp_in
+    real(r8), intent(out), dimension(nz) :: xm_out, wpxp_out
+    integer, intent(out) :: err_out
+    real(r8), dimension(nz) :: xm, wpxp
+    if (nz /= gr%nz) stop 'drv_mono_flux_limiter: nz mismatch'
+    xm = xm_in
+    wpxp = wpxp_in
+    err_code = clubb_no_error
+    call monotonic_turbulent_flux_limit( solve_type, dt, xm_old, &
+                                         xp2, wm_zt, xm_forcing, &
+                                         rho_ds_zm, rho_ds_zt, &
+                                         invrs_rho_ds_zm, &
+                                         invrs_rho_ds_zt, &
+                                         xp2_threshold, .true., &
+                                         low_lev, high_lev, &
+                                         xm, xm_tol, wpxp )
+    err_out = err_code
+    err_code = clubb_no_error
+    xm_out = xm
+    wpxp_out = wpxp
+  end subroutine drv_mono_flux_limiter
+
+  !---------------------------------------------------------------------
+  ! The REAL (public) fill_holes_vertical on the "zt" grid, exactly as
+  ! xm_wpxp_clipping_and_stats calls it (num_draw_pts=2).
+  subroutine drv_fill_holes_zt(nz, threshold, rho_ds_zt, rho_ds_zm, &
+                               field_in, field_out)
+    use grid_class, only: gr
+    use fill_holes, only: fill_holes_vertical
+    integer, intent(in) :: nz
+    real(r8), intent(in) :: threshold
+    real(r8), intent(in), dimension(nz) :: rho_ds_zt, rho_ds_zm, &
+        field_in
+    real(r8), intent(out), dimension(nz) :: field_out
+    real(r8), dimension(nz) :: field
+    if (nz /= gr%nz) stop 'drv_fill_holes_zt: nz mismatch'
+    field = field_in
+    call fill_holes_vertical( 2, threshold, "zt", rho_ds_zt, &
+                              rho_ds_zm, field )
+    field_out = field
+  end subroutine drv_fill_holes_zt
+
+  !---------------------------------------------------------------------
+  ! The REAL (public) advance_xm_wpxp, exactly as advance_clubb_core
+  ! calls it under the EAMv3 configuration: sclr_dim = 0,
+  ! l_implemented = .true., Cx_fnc_Richardson = 0 (the l_use_*
+  ! Richardson flags are all false), pdf_implicit_coefs_terms
+  ! zero-filled (only read on the iiPDF_new path; EAM is compile-time
+  ! ADG1), pert pointers unassociated, and the um/vm prediction inputs
+  ! zero/dummy (l_predict_upwp_vpwp = .false.: um/vm/upwp/vpwp pass
+  ! through untouched -- asserted by the golden generator).
+  subroutine drv_advance_xm_wpxp(nz, dt, sigma_sqd_w, wm_zm, wm_zt, &
+      wp2, Lscale, em, wp3_on_wp2, wp3_on_wp2_zt, Kh_zt, Kh_zm, &
+      tau_C6_zm, Skw_zm, wp2rtp, rtpthvp, rtm_forcing, wprtp_forcing, &
+      wp2thlp, thlpthvp, thlm_forcing, wpthlp_forcing, rho_ds_zm, &
+      rho_ds_zt, invrs_rho_ds_zm, invrs_rho_ds_zt, thv_ds_zm, rtp2, &
+      thlp2, w_1_zm, w_2_zm, varnce_w_1_zm, varnce_w_2_zm, &
+      mixt_frac_zm, exner, rcm, p_in_pa, thvm, &
+      rtm_in, wprtp_in, thlm_in, wpthlp_in, &
+      rtm_out, wprtp_out, thlm_out, wpthlp_out, err_out)
+    use grid_class, only: gr
+    use advance_xm_wpxp_module, only: advance_xm_wpxp
+    use pdf_parameter_module, only: implicit_coefs_terms
+    use error_code, only: err_code, clubb_no_error
+    integer, intent(in) :: nz
+    real(r8), intent(in) :: dt
+    real(r8), intent(in), dimension(nz) :: sigma_sqd_w, wm_zm, wm_zt, &
+        wp2, Lscale, em, wp3_on_wp2, wp3_on_wp2_zt, Kh_zt, Kh_zm, &
+        tau_C6_zm, Skw_zm, wp2rtp, rtpthvp, rtm_forcing, &
+        wprtp_forcing, wp2thlp, thlpthvp, thlm_forcing, &
+        wpthlp_forcing, rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm, &
+        invrs_rho_ds_zt, thv_ds_zm, rtp2, thlp2, w_1_zm, w_2_zm, &
+        varnce_w_1_zm, varnce_w_2_zm, mixt_frac_zm, exner, rcm, &
+        p_in_pa, thvm
+    real(r8), intent(in), dimension(nz) :: rtm_in, wprtp_in, thlm_in, &
+        wpthlp_in
+    real(r8), intent(out), dimension(nz) :: rtm_out, wprtp_out, &
+        thlm_out, wpthlp_out
+    integer, intent(out) :: err_out
+
+    real(r8), dimension(nz) :: rtm, wprtp, thlm, wpthlp
+    real(r8), dimension(nz) :: um, vm, upwp, vpwp
+    real(r8), dimension(nz) :: zeros, cx_fnc_richardson
+    real(r8), dimension(nz, 0) :: wp2sclrp, sclrpthvp, sclrm_forcing, &
+        sclrp2, sclrm, wpsclrp
+    type(implicit_coefs_terms), dimension(nz) :: pdf_ict
+    real(r8), pointer, dimension(:) :: um_pert => null(), &
+        vm_pert => null(), upwp_pert => null(), vpwp_pert => null()
+    real(r8), parameter :: z = 0.0_r8
+
+    if (nz /= gr%nz) stop 'drv_advance_xm_wpxp: nz mismatch'
+    pdf_ict = implicit_coefs_terms(z, z, z, z, z, z, z, z, z)
+    zeros = 0.0_r8
+    cx_fnc_richardson = 0.0_r8
+    um = 0.0_r8
+    vm = 0.0_r8
+    upwp = 0.0_r8
+    vpwp = 0.0_r8
+
+    rtm = rtm_in
+    wprtp = wprtp_in
+    thlm = thlm_in
+    wpthlp = wpthlp_in
+    err_code = clubb_no_error
+
+    call advance_xm_wpxp( dt, sigma_sqd_w, wm_zm, wm_zt, wp2, &
+                          Lscale, wp3_on_wp2, wp3_on_wp2_zt, Kh_zt, &
+                          Kh_zm, tau_C6_zm, Skw_zm, wp2rtp, rtpthvp, &
+                          rtm_forcing, wprtp_forcing, zeros, wp2thlp, &
+                          thlpthvp, thlm_forcing, wpthlp_forcing, &
+                          zeros, rho_ds_zm, rho_ds_zt, &
+                          invrs_rho_ds_zm, invrs_rho_ds_zt, &
+                          thv_ds_zm, rtp2, thlp2, w_1_zm, w_2_zm, &
+                          varnce_w_1_zm, varnce_w_2_zm, mixt_frac_zm, &
+                          .true., em, wp2sclrp, sclrpthvp, &
+                          sclrm_forcing, sclrp2, exner, rcm, p_in_pa, &
+                          thvm, cx_fnc_richardson, pdf_ict, &
+                          zeros, zeros, zeros, zeros, zeros, &
+                          1.0e-4_r8, zeros, zeros, zeros, zeros, &
+                          zeros, zeros, zeros, &
+                          rtm, wprtp, thlm, wpthlp, &
+                          sclrm, wpsclrp, um, upwp, vm, vpwp, &
+                          um_pert, vm_pert, upwp_pert, vpwp_pert )
+
+    err_out = err_code
+    err_code = clubb_no_error
+
+    if (any(um /= 0.0_r8) .or. any(vm /= 0.0_r8) .or. &
+        any(upwp /= 0.0_r8) .or. any(vpwp /= 0.0_r8)) then
+      stop 'drv_advance_xm_wpxp: um/vm touched (l_predict_upwp_vpwp?)'
+    end if
+
+    rtm_out = rtm
+    wprtp_out = wprtp
+    thlm_out = thlm
+    wpthlp_out = wpthlp
+  end subroutine drv_advance_xm_wpxp
+
 end module clubb_driver

@@ -1134,7 +1134,7 @@ def _advance_entry(cols, c, nz, z_t, z_m, fluxes, sfc_elevation=0.0):
     assert aerr == 0, (c, aerr)
     return prog_in, prog_out, diag, dict(
         p=p, exner=exner, rho_ds_zm=rho_ds_zm, rho_ds_zt=rho_ds_zt,
-        rho_t=rho_t, edsclr_in=edsclr_in)
+        rho_t=rho_t, edsclr_in=edsclr_in, pdfp_zm=_pm)
 
 
 def _seg_case_from_state(cols, c, st):
@@ -1529,12 +1529,548 @@ def gen_lscale(params, idx):
     return out
 
 
+# ---------------------------------------------------------------------------
+# Slice E: advance_xm_wpxp (+ dgbsv band solver, calc_turb_adv_range,
+# monotonic flux limiter, fill_holes "zt")
+# ---------------------------------------------------------------------------
+
+XM_WPXP_IDX_NAMES = ["C7c", "c_K6", "nu6", "C6rt_Lscale0",
+                     "C6thl_Lscale0", "C7_Lscale0"]
+
+# drv_advance_xm_wpxp per-column array inputs, in signature order.
+# DEAD under the EAMv3 flag set but real Fortran arguments (recorded so
+# the port scope is checkable): em, wp3_on_wp2, kh_zm, wp2rtp, wp2thlp
+# (l_explicit_turbulent_adv_wpxp=F + l_upwind_wpxp_ta=F), exner, rcm,
+# p, thvm (l_diffuse_rtm_and_thlm=F, l_stability_correct_Kh_N2_zm=F).
+XM_WPXP_INPUTS = [
+    "sigma_sqd_w", "wm_zm", "wm_zt", "wp2", "lscale", "em",
+    "wp3_on_wp2", "wp3_on_wp2_zt", "kh_zt", "kh_zm", "tau_c6_zm",
+    "skw_zm", "wp2rtp", "rtpthvp", "rtm_forcing", "wprtp_forcing",
+    "wp2thlp", "thlpthvp", "thlm_forcing", "wpthlp_forcing",
+    "rho_ds_zm", "rho_ds_zt", "invrs_rho_ds_zm", "invrs_rho_ds_zt",
+    "thv_ds_zm", "rtp2", "thlp2", "w_1_zm", "w_2_zm",
+    "varnce_w_1_zm", "varnce_w_2_zm", "mixt_frac_zm", "exner", "rcm",
+    "p", "thvm", "rtm", "wprtp", "thlm", "wpthlp"]
+
+XM_WPXP_PROG = ["rtm", "wprtp", "thlm", "wpthlp"]
+
+RT_TOL_MFL = 1.0e-4     # constants_clubb
+THL_TOL_MFL = 1.0e-2
+
+
+def _sigma_from_state(nz, wp2, wp3_zm, rtp2, thlp2, up2, vp2, wprtp,
+                      wpthlp, upwp, vpwp):
+    """Skw_zm / gamma / sigma_sqd_w exactly as the harness builds them
+    elsewhere (inputs to advance_xm_wpxp are replayed verbatim)."""
+    skw_zm = d.drv_skx(wp2, wp3_zm, 2.0e-2)
+    gam = 0.28 + (0.12 - 0.28) * np.exp(-0.5 * (skw_zm / 1.2) ** 2)
+    sig = d.drv_sigma_sqd_w(gam, wp2, thlp2, rtp2, up2, vp2, wpthlp,
+                            wprtp, upwp, vpwp)
+    del nz
+    return skw_zm, np.clip(sig, 0.0, 0.99)
+
+
+def _build_xm_wpxp_adv(nz, zt, zm, rng, nadv=16):
+    """Cases whose prognostics/moments/Kh/pdf-params come from REAL
+    one-step advance_clubb_core-advanced states (tau/Lscale plausible
+    synthetics -- slice D owns their computation; advance_xm_wpxp
+    replays whatever it is fed)."""
+    z_t = np.maximum(zt, 0.0)
+    z_m = np.maximum(zm, 0.0)
+    cols = _build_driver_columns(nz, zt, zm, rng)
+    cases = []
+    for j in range(nadv):
+        c = j % 16
+        fluxes = SEG_SFC_FLUXES[j % len(SEG_SFC_FLUXES)]
+        _pi, po, diag, env = _advance_entry(cols, c, nz, z_t, z_m,
+                                            fluxes)
+        pm = env["pdfp_zm"]
+        wp2, wp3 = po[:, 10], po[:, 11]
+        wp3_zm = _zt2zm_f(wp3, nz)
+        wp2_zt = np.maximum(_zm2zt_f(wp2, nz), W_TOL_SQD)
+        skw_zm, sig = _sigma_from_state(
+            nz, wp2, wp3_zm, po[:, 12], po[:, 14], po[:, 4], po[:, 5],
+            po[:, 8], po[:, 9], po[:, 2], po[:, 3])
+        bl_t = np.exp(-z_t / rng.uniform(800.0, 2500.0))
+        lscale = rng.uniform(30.0, 1200.0) * bl_t + 10.0
+        tau_c6 = rng.uniform(50.0, 400.0) + rng.uniform(
+            400.0, 3000.0) * (1.0 - np.exp(-z_m / 1500.0))
+        thv_ds_zt = cols["thv_ds_zt"][c]
+        case = dict(
+            sigma_sqd_w=sig, wm_zm=cols["wm_zm"][c],
+            wm_zt=cols["wm_zt"][c], wp2=wp2, lscale=lscale,
+            em=0.5 * (wp2 + po[:, 5] + po[:, 4]),
+            wp3_on_wp2=wp3_zm / wp2, wp3_on_wp2_zt=wp3 / wp2_zt,
+            kh_zt=diag[:, 1], kh_zm=diag[:, 0], tau_c6_zm=tau_c6,
+            skw_zm=skw_zm, wp2rtp=_zm2zt_f(wp2 * po[:, 8], nz),
+            rtpthvp=po[:, 21], rtm_forcing=np.zeros(nz),
+            wprtp_forcing=np.zeros(nz),
+            wp2thlp=_zm2zt_f(wp2 * po[:, 9], nz),
+            thlpthvp=po[:, 22], thlm_forcing=np.zeros(nz),
+            wpthlp_forcing=np.zeros(nz), rho_ds_zm=env["rho_ds_zm"],
+            rho_ds_zt=env["rho_ds_zt"],
+            invrs_rho_ds_zm=1.0 / env["rho_ds_zm"],
+            invrs_rho_ds_zt=1.0 / env["rho_ds_zt"],
+            thv_ds_zm=cols["thv_ds_zm"][c], rtp2=po[:, 12],
+            thlp2=po[:, 14], w_1_zm=pm[:, 0], w_2_zm=pm[:, 1],
+            varnce_w_1_zm=pm[:, 2], varnce_w_2_zm=pm[:, 3],
+            mixt_frac_zm=pm[:, 44], exner=env["exner"],
+            rcm=po[:, 17], p=env["p"],
+            thvm=po[:, 6] + 0.61 * thv_ds_zt * po[:, 7],
+            rtm=po[:, 7], wprtp=po[:, 8], thlm=po[:, 6],
+            wpthlp=po[:, 9])
+        if j % 4 == 3:
+            # mild forcings on some adv cases
+            case["rtm_forcing"] = rng.normal(0.0, 2e-8, nz)
+            case["thlm_forcing"] = rng.normal(0.0, 2e-5, nz)
+        cases.append(case)
+    return cases
+
+
+def _build_xm_wpxp_synthetic(nz, zt, zm, rng, ncase=24):
+    """Synthetic stress columns: strong flux divergence (mono limiter
+    bait), near-threshold Lscale (wpxp_L_thresh=100 damping),
+    stable/unstable/extreme-skew regimes, degenerate wp2, correlation
+    clip bait, rtm hole bait."""
+    z_t = np.maximum(zt, 0.0)
+    z_m = np.maximum(zm, 0.0)
+    cases = []
+    for c in range(ncase):
+        fam = c % 8
+        env = _xp2_env(nz, z_t, z_m, rng)
+        bl_m, bl_t = env["bl_m"], env["bl_t"]
+        rtm = env["rtm"]
+        thlm = env["thlm"]
+        rtm_m = _interp_zm(z_m, z_t, rtm)
+
+        wp2 = np.maximum(rng.uniform(0.2, 0.8) * bl_m + 1e-3,
+                         W_TOL_SQD)
+        skw_t = rng.normal(0.0, 1.0, nz) * bl_t
+        rtp2 = (rng.uniform(0.05, 0.25) * rtm_m) ** 2 * bl_m + 1e-14
+        thlp2 = rng.uniform(0.1, 1.0) ** 2 * bl_m + 1e-6
+        up2 = rng.uniform(0.05, 0.6) * bl_m + 1e-4
+        vp2 = rng.uniform(0.05, 0.6) * bl_m + 1e-4
+        wprtp_forcing = np.zeros(nz)
+        wpthlp_forcing = np.zeros(nz)
+        rtm_forcing = np.zeros(nz)
+        thlm_forcing = np.zeros(nz)
+        lscale = rng.uniform(30.0, 1200.0) * bl_t + 10.0
+
+        if fam == 0:
+            # strong flux divergence: big w'x' forcing in a narrow
+            # band + tiny variances -> tight mfl envelope -> the
+            # monotonic flux limiter MUST engage
+            band = np.exp(-((z_m - 1500.0) / 250.0) ** 2)
+            wprtp_forcing = 3e-6 * band
+            wpthlp_forcing = 1.0 * band
+            rtp2 = np.full(nz, 1e-12)
+            thlp2 = np.full(nz, 1e-5)
+        elif fam == 1:
+            # Lscale sweeping through wpxp_L_thresh = 100 m, with zt
+            # crossing altitude_threshold = 100 m (both arms of the
+            # damp_coefficient where-mask)
+            lscale = 40.0 + 120.0 * (1.0 - np.exp(-z_t / 3000.0)) \
+                + rng.uniform(-15.0, 15.0, nz) * bl_t
+            lscale = np.maximum(lscale, 5.0)
+        elif fam == 2:
+            # stable BL: weak wp2, negative skewness, downward fluxes
+            wp2 = 0.02 * bl_m + 1e-3
+            skw_t = -rng.uniform(0.2, 1.5) * bl_t
+        elif fam == 3:
+            # extreme skewness both signs (C6/C7 Skw functions +
+            # strongly skewed pdf params for the turb-adv range)
+            skw_t = np.sign(np.sin(z_t / 1200.0)) \
+                * rng.uniform(3.0, 4.4) * bl_t
+        elif fam == 4:
+            # degenerate wp2 at the w_tol_sqd floor
+            wp2 = np.full(nz, W_TOL_SQD)
+            skw_t = np.zeros(nz)
+        elif fam == 5:
+            # correlation-clip bait: fluxes far beyond the 0.99
+            # correlation bound (clip_covar engagement)
+            pass  # handled below via corr multipliers
+        elif fam == 6:
+            # rtm hole bait: forcing drives rtm strongly negative in a
+            # band -> mfl bound crossing + fill_holes_vertical "zt"
+            band = np.exp(-((z_t - 2000.0) / 500.0) ** 2)
+            rtm_forcing = -1.5 * rtm / DT_EAMV3 * band
+            thlm_forcing = -rng.uniform(0.5, 2.0) * band / DT_EAMV3
+        # fam 7: randomized defaults + strong mean advection
+        if fam == 7:
+            env["wm_zm"] = 0.15 * np.sin(z_m / 2200.0)
+
+        wm_zm = env["wm_zm"] if isinstance(env["wm_zm"], np.ndarray) \
+            else env["wm_zm"] * np.ones(nz)
+        wm_zt = _interp_zm(z_t, z_m, wm_zm)
+
+        cmul = 3.0 if fam == 5 else 0.8
+        wprtp = rng.uniform(-cmul, cmul, nz) * np.sqrt(wp2 * rtp2)
+        wpthlp = rng.uniform(-cmul, cmul, nz) * np.sqrt(wp2 * thlp2)
+        upwp = rng.uniform(-0.6, 0.6, nz) * np.sqrt(wp2 * up2)
+        vpwp = rng.uniform(-0.6, 0.6, nz) * np.sqrt(wp2 * vp2)
+
+        wp2_zt = np.maximum(_zm2zt_f(wp2, nz), W_TOL_SQD)
+        wp3 = skw_t * wp2_zt ** 1.5
+        wp3_zm = _zt2zm_f(wp3, nz)
+        skw_zm, sig = _sigma_from_state(nz, wp2, wp3_zm, rtp2, thlp2,
+                                        up2, vp2, wprtp, wpthlp, upwp,
+                                        vpwp)
+
+        # plausible two-component w PDF on zm levels (drives
+        # calc_turb_adv_range; consistent-ish with wp2/Skw)
+        mixt = np.clip(0.5 - 0.2 * np.tanh(skw_zm), 0.01, 0.99)
+        w_1 = np.sqrt(wp2) * rng.uniform(0.4, 1.2)
+        w_2 = -mixt / (1.0 - mixt) * w_1
+        vw1 = np.maximum(0.3 * wp2, 1e-6)
+        vw2 = np.maximum(0.5 * wp2, 1e-6)
+        if fam == 3:
+            # strong updraft/downdraft asymmetry: exercise the
+            # one-sided (all-up / all-down) turb-adv-range stops
+            w_1 = np.abs(w_1) * 4.0 + 1.0
+            w_2 = np.where(z_m < 3000.0, -(np.abs(w_2) * 4.0 + 1.0),
+                           w_1)
+            vw1 = np.full(nz, 1e-4)
+            vw2 = np.full(nz, 1e-4)
+
+        rho_ds_zt = env["rho_ds_zt"]
+        rho_ds_zm = env["rho_ds_zm"]
+        exner = (env["p"] / 1.0e5) ** (287.042 / 1004.64)
+        thv_ds_zm = _interp_zm(z_m, z_t, thlm)
+        rtpthvp = rng.normal(0.0, 1.0, nz) * np.sqrt(rtp2) * 0.3
+        thlpthvp = rng.normal(0.0, 1.0, nz) * np.sqrt(thlp2) * 0.3
+        if fam == 0:
+            rtpthvp = rtpthvp + 2e-5 * np.exp(
+                -((z_m - 1500.0) / 250.0) ** 2)
+
+        tau_c6 = env["tau_zm"]
+        case = dict(
+            sigma_sqd_w=sig, wm_zm=wm_zm, wm_zt=wm_zt, wp2=wp2,
+            lscale=lscale, em=0.5 * (wp2 + vp2 + up2),
+            wp3_on_wp2=wp3_zm / wp2, wp3_on_wp2_zt=wp3 / wp2_zt,
+            kh_zt=env["kh_zt"], kh_zm=_zt2zm_f(env["kh_zt"], nz),
+            tau_c6_zm=tau_c6, skw_zm=skw_zm,
+            wp2rtp=_zm2zt_f(wp2 * wprtp, nz), rtpthvp=rtpthvp,
+            rtm_forcing=rtm_forcing, wprtp_forcing=wprtp_forcing,
+            wp2thlp=_zm2zt_f(wp2 * wpthlp, nz), thlpthvp=thlpthvp,
+            thlm_forcing=thlm_forcing,
+            wpthlp_forcing=wpthlp_forcing, rho_ds_zm=rho_ds_zm,
+            rho_ds_zt=rho_ds_zt, invrs_rho_ds_zm=1.0 / rho_ds_zm,
+            invrs_rho_ds_zt=1.0 / rho_ds_zt, thv_ds_zm=thv_ds_zm,
+            rtp2=rtp2, thlp2=thlp2, w_1_zm=w_1, w_2_zm=w_2,
+            varnce_w_1_zm=vw1, varnce_w_2_zm=vw2, mixt_frac_zm=mixt,
+            exner=exner, rcm=np.zeros(nz), p=env["p"],
+            thvm=thlm + 0.61 * thlm * rtm, rtm=rtm, wprtp=wprtp,
+            thlm=thlm, wpthlp=wpthlp)
+        cases.append(case)
+    return cases
+
+
+def gen_xm_wpxp(params, idx):
+    zi, zt = eam_like_grid(73)
+    nz = zi.size
+    err = d.drv_setup(29, params, zi, zt)
+    assert err == 0
+    d.drv_set_eam_flags(2, True)
+
+    nu6, iflags = d.drv_xm_wpxp_config(nz)
+    # EAMv3 model_flags configuration (drv_xm_wpxp_config slots):
+    # l_clip_semi_implicit=F, l_explicit_turbulent_adv_wpxp=F,
+    # l_upwind_wpxp_ta=F (CENTERED wpxp turbulent advection -- unlike
+    # xpyp!), l_predict_upwp_vpwp=F, l_uv_nudge=F, l_pos_def=F,
+    # l_hole_fill=T, l_clip_turb_adv=F, l_diffuse_rtm_and_thlm=F,
+    # l_stability_correct_Kh_N2_zm=F, rtm/thlm sponge damping OFF,
+    # l_tke_aniso=T.  With l_stats=F this also fixes the solver:
+    # xm_wpxp_solve without rcond -> band_solve -> LAPACK dgbsv (the
+    # dgbsvx iterative-refinement path needs the matrix-condition
+    # stats, which are off).
+    assert list(iflags) == [0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1], \
+        list(iflags)
+
+    rng = np.random.default_rng(20260715)
+    out = {"zi": zi, "zt": zt, "dt": np.array(DT_EAMV3),
+           "nu6_vert_res_dep": nu6, "xm_wpxp_flags": np.asarray(iflags)}
+
+    # ---- BAND: dgbsv kernel goldens (drv_band_solve) ----------------
+    band_cases = []
+    for ndim, nrhs in [(146, 2), (146, 1), (82, 2), (10, 3), (6, 1)]:
+        # CLUBB-like: interleaved xm/wpxp structure, identity boundary
+        # rows, diagonally dominant interior
+        lhs = np.zeros((5, ndim))
+        lhs[2, :] = 1.0 / DT_EAMV3 + rng.uniform(0.5, 2.0, ndim) * 1e-2
+        lhs[0, :] = rng.normal(0.0, 3e-3, ndim)
+        lhs[1, :] = rng.normal(0.0, 3e-3, ndim)
+        lhs[3, :] = rng.normal(0.0, 3e-3, ndim)
+        lhs[4, :] = rng.normal(0.0, 3e-3, ndim)
+        for b in (0, 1, ndim - 1):
+            lhs[:, b] = 0.0
+            lhs[2, b] = 1.0
+        rhs = rng.normal(size=(ndim, nrhs))
+        band_cases.append((lhs, rhs))
+        # non-dominant: pivoting exercised hard
+        lhs = rng.normal(size=(5, ndim))
+        lhs[2, :] *= 0.05
+        rhs = rng.normal(size=(ndim, nrhs))
+        band_cases.append((lhs, rhs))
+        # mixed magnitudes
+        lhs = rng.normal(size=(5, ndim)) \
+            * 10.0 ** rng.integers(-6, 6, (5, ndim))
+        rhs = rng.normal(size=(ndim, nrhs))
+        band_cases.append((lhs, rhs))
+    out["band_ncases"] = np.array(len(band_cases))
+    for i, (lhs, rhs) in enumerate(band_cases):
+        sol, e = d.drv_band_solve(lhs, rhs)
+        assert e == 0, (i, e)
+        out[f"band_{i}_lhs"] = lhs
+        out[f"band_{i}_rhs"] = rhs
+        out[f"band_{i}_solution"] = sol
+
+    # ---- full advance_xm_wpxp cases ---------------------------------
+    cases = _build_xm_wpxp_adv(nz, zt, zi, rng) \
+        + _build_xm_wpxp_synthetic(nz, zt, zi, rng)
+    ncase = len(cases)
+    ins = {k: np.zeros((ncase, nz)) for k in XM_WPXP_INPUTS}
+    outs = {k: np.zeros((ncase, nz)) for k in XM_WPXP_PROG}
+    rng_lo = np.zeros((ncase, nz), dtype=np.int64)
+    rng_hi = np.zeros((ncase, nz), dtype=np.int64)
+    for c, case in enumerate(cases):
+        for k in XM_WPXP_INPUTS:
+            ins[k][c] = case[k]
+        args = [case[k] for k in XM_WPXP_INPUTS]
+        r, wr, t, wt, e = d.drv_advance_xm_wpxp(DT_EAMV3, *args)
+        assert e == 0, (c, e)
+        outs["rtm"][c] = r
+        outs["wprtp"][c] = wr
+        outs["thlm"][c] = t
+        outs["wpthlp"][c] = wt
+        # the internal calc_turb_adv_range on the same pdf inputs
+        # (recorded so the port's internal range is directly checkable)
+        lo, hi = d.drv_calc_turb_adv_range(
+            DT_EAMV3, case["w_1_zm"], case["w_2_zm"],
+            case["varnce_w_1_zm"], case["varnce_w_2_zm"],
+            case["mixt_frac_zm"])
+        rng_lo[c] = lo
+        rng_hi[c] = hi
+
+    # ---- branch-coverage sanity (post-hoc detectable) ----------------
+    # clip_covar engagement: |corr| exactly at the (relaxed) bound
+    bound_rt = 0.99 * np.sqrt(ins["wp2"] * np.maximum(1e-7,
+                                                      ins["rtp2"]))
+    bound_thl = 0.99 * np.sqrt(ins["wp2"] * np.maximum(0.01,
+                                                       ins["thlp2"]))
+    ncl_rt = int((np.abs(outs["wprtp"][:, 1:-1])
+                  == bound_rt[:, 1:-1]).sum())
+    ncl_thl = int((np.abs(outs["wpthlp"][:, 1:-1])
+                   == bound_thl[:, 1:-1]).sum())
+    assert ncl_rt > 0 and ncl_thl > 0, (ncl_rt, ncl_thl)
+    # hole-fill / mfl stress: the fam-6 hole-bait columns must leave a
+    # visible signature (fill cannot always reach the threshold when
+    # the forcing removes more mass than the column holds)
+    nneg = int((outs["rtm"][:, 1:] < 0.0).sum())
+    print(f"xm_wpxp coverage: wprtp clipped {ncl_rt} pts, wpthlp "
+          f"clipped {ncl_thl} pts, rtm<0 after fill {nneg} pts")
+    # limiter/hole-fill engagement inside the full routine is asserted
+    # at TEST time from the port's own intermediates (the Fortran
+    # routine exposes no per-branch diagnostics with l_stats=F); the
+    # direct mfl/fill goldens below carry generation-time counts.
+
+    out.update({f"in_{k}": v for k, v in ins.items()})
+    out.update({f"out_{k}": v for k, v in outs.items()})
+    out.update(range_low=rng_lo, range_high=rng_hi,
+               nadv=np.array(16))
+
+    # ---- RANGE: calc_turb_adv_range synthetic extremes ---------------
+    nrg = 12
+    rg_ins = {k: np.zeros((nrg, nz)) for k in
+              ["w_1_zm", "w_2_zm", "varnce_w_1_zm", "varnce_w_2_zm",
+               "mixt_frac_zm"]}
+    rg_dt = np.zeros(nrg)
+    rg_lo = np.zeros((nrg, nz), dtype=np.int64)
+    rg_hi = np.zeros((nrg, nz), dtype=np.int64)
+    for c in range(nrg):
+        fam = c % 6
+        if fam == 0:      # strong updrafts everywhere (down blocked)
+            w1 = np.full(nz, 3.0); w2 = np.full(nz, 1.0)
+            v1 = np.full(nz, 1e-4); v2 = np.full(nz, 1e-4)
+            mf = np.full(nz, 0.5)
+        elif fam == 1:    # strong downdrafts everywhere (up blocked)
+            w1 = np.full(nz, -3.0); w2 = np.full(nz, -1.0)
+            v1 = np.full(nz, 1e-4); v2 = np.full(nz, 1e-4)
+            mf = np.full(nz, 0.5)
+        elif fam == 2:    # huge velocities -> boundary stops (2 / nz)
+            # mean |w| = 250 m/s crosses the whole 41-km column in
+            # ~164 s < dt, so every interior level hits the 2/nz stops
+            w1 = np.full(nz, 500.0); w2 = np.full(nz, -500.0)
+            v1 = np.full(nz, 25.0); v2 = np.full(nz, 25.0)
+            mf = np.full(nz, 0.5)
+        elif fam == 3:    # near-zero velocities -> immediate dt stop
+            w1 = np.full(nz, 1e-4); w2 = np.full(nz, -1e-4)
+            v1 = np.full(nz, 1e-10); v2 = np.full(nz, 1e-10)
+            mf = np.full(nz, 0.5)
+        elif fam == 4:    # mixt_frac extremes + straddling components
+            w1 = rng.uniform(0.5, 2.0, nz)
+            w2 = -rng.uniform(0.5, 2.0, nz)
+            v1 = rng.uniform(1e-6, 0.5, nz)
+            v2 = rng.uniform(1e-6, 0.5, nz)
+            mf = np.where(np.arange(nz) % 2 == 0, 0.999, 0.001)
+        else:             # randomized
+            w1 = rng.normal(0.0, 1.5, nz)
+            w2 = rng.normal(0.0, 1.5, nz)
+            v1 = rng.uniform(1e-8, 1.0, nz)
+            v2 = rng.uniform(1e-8, 1.0, nz)
+            mf = rng.uniform(0.01, 0.99, nz)
+        dtc = DT_EAMV3 if c < 6 else 60.0
+        lo, hi = d.drv_calc_turb_adv_range(dtc, w1, w2, v1, v2, mf)
+        for k, v in [("w_1_zm", w1), ("w_2_zm", w2),
+                     ("varnce_w_1_zm", v1), ("varnce_w_2_zm", v2),
+                     ("mixt_frac_zm", mf)]:
+            rg_ins[k][c] = v
+        rg_dt[c] = dtc
+        rg_lo[c] = lo
+        rg_hi[c] = hi
+    # coverage: both one-sided stops and boundary stops occur
+    assert (rg_hi[0, 3:nz - 2] == np.arange(3, nz - 2) + 1).all()
+    assert (rg_lo[1, 3:nz - 2] == np.arange(3, nz - 2) + 1).all()
+    assert (rg_lo[2, 3:nz - 2] == 2).all() and \
+           (rg_hi[2, 3:nz - 2] == nz).all()
+    out.update({f"rg_in_{k}": v for k, v in rg_ins.items()})
+    out.update(rg_dt=rg_dt, rg_low=rg_lo, rg_high=rg_hi)
+
+    # ---- MFL: monotonic_turbulent_flux_limit driven directly ---------
+    # post-solve-like states with synthetic spikes; solve_type 2=rtm,
+    # 1=thlm (values match advance_xm_wpxp's named constants).
+    nmfl = 20
+    mfl_keys = ["xm_old", "xp2", "wm_zt", "xm_forcing", "rho_ds_zm",
+                "rho_ds_zt", "xm_in", "wpxp_in", "low_lev", "high_lev"]
+    mfl_ins = {k: np.zeros((nmfl, nz)) for k in mfl_keys}
+    mfl_solve_type = np.zeros(nmfl, dtype=np.int64)
+    mfl_outs = {k: np.zeros((nmfl, nz)) for k in ["xm", "wpxp"]}
+    n_engaged = 0
+    n_noop = 0
+    for c in range(nmfl):
+        is_rt = c % 2 == 0
+        env = _xp2_env(nz, np.maximum(zt, 0.0), np.maximum(zi, 0.0),
+                       rng)
+        xm_old = env["rtm"] if is_rt else env["thlm"]
+        xp2 = ((rng.uniform(0.02, 0.2) * xm_old[0]) ** 2
+               * env["bl_m"] + (1e-14 if is_rt else 1e-6))
+        forcing = np.zeros(nz)
+        wpxp = rng.uniform(-1.0, 1.0, nz) * np.sqrt(
+            np.maximum(xp2, 0.0) * 0.3)
+        fam = (c // 2) % 5
+        if fam == 0:
+            # big spike -> engagement (upper arm)
+            wpxp = wpxp + (5e-3 if is_rt else 30.0) * np.exp(
+                -((np.maximum(zi, 0.0) - 1200.0) / 300.0) ** 2)
+        elif fam == 1:
+            # negative spike -> engagement (lower arm)
+            wpxp = wpxp - (5e-3 if is_rt else 30.0) * np.exp(
+                -((np.maximum(zi, 0.0) - 2500.0) / 400.0) ** 2)
+        elif fam == 2:
+            # gentle flux, wide xp2 -> exact no-op
+            xp2 = xp2 + (1e-6 if is_rt else 4.0)
+            wpxp = 0.01 * np.sqrt(xp2 * W_TOL_SQD) \
+                * np.sin(np.arange(nz))
+        elif fam == 3:
+            # forcing-heavy + spike (xm_without_ta shifted)
+            forcing = (rng.normal(0.0, 5e-8, nz) if is_rt
+                       else rng.normal(0.0, 1e-4, nz))
+            wpxp = wpxp * 50.0
+        else:
+            # top-level spike bait (domain-top conservation branch)
+            wpxp = wpxp * 60.0
+            wpxp[-3:-1] = (2e-2 if is_rt else 80.0)
+        wpxp[0] = wpxp[1] * 0.5
+        wpxp[-1] = 0.0
+        # xm entering the mfl = a plausible post-solve state
+        xm = xm_old + DT_EAMV3 * forcing + rng.normal(
+            0.0, (2e-5 if is_rt else 0.05), nz) * env["bl_t"]
+        xm[0] = xm[1]
+        # a plausible turb-adv range (from a generic pdf)
+        lo, hi = d.drv_calc_turb_adv_range(
+            DT_EAMV3, np.full(nz, 0.5), np.full(nz, -0.5),
+            np.full(nz, 0.09), np.full(nz, 0.09), np.full(nz, 0.5))
+        st = 2 if is_rt else 1
+        xp2_thr = RT_TOL ** 2 if is_rt else THL_TOL ** 2
+        xm_tol = RT_TOL_MFL if is_rt else THL_TOL_MFL
+        xm_o, wpxp_o, e = d.drv_mono_flux_limiter(
+            st, DT_EAMV3, xm_old, xp2, env["wm_zm"] * 0.0, forcing,
+            env["rho_ds_zm"], env["rho_ds_zt"],
+            1.0 / env["rho_ds_zm"], 1.0 / env["rho_ds_zt"],
+            xp2_thr, xm_tol, lo, hi, xm, wpxp)
+        assert e == 0, (c, e)
+        engaged = not np.array_equal(wpxp_o, wpxp)
+        if engaged:
+            n_engaged += 1
+            assert not np.array_equal(xm_o, xm), c  # imp re-solve ran
+        else:
+            n_noop += 1
+            assert np.array_equal(xm_o, xm), c      # exact no-op
+        for k, v in [("xm_old", xm_old), ("xp2", xp2),
+                     ("wm_zt", env["wm_zm"] * 0.0),
+                     ("xm_forcing", forcing),
+                     ("rho_ds_zm", env["rho_ds_zm"]),
+                     ("rho_ds_zt", env["rho_ds_zt"]),
+                     ("xm_in", xm), ("wpxp_in", wpxp),
+                     ("low_lev", lo), ("high_lev", hi)]:
+            mfl_ins[k][c] = v
+        mfl_solve_type[c] = st
+        mfl_outs["xm"][c] = xm_o
+        mfl_outs["wpxp"][c] = wpxp_o
+    assert n_engaged >= 8 and n_noop >= 2, (n_engaged, n_noop)
+    # both clip arms must appear among engaged cases
+    dwp = mfl_outs["wpxp"] - mfl_ins["wpxp_in"]
+    assert (dwp < 0).any() and (dwp > 0).any()
+    print(f"mfl coverage: engaged {n_engaged}/{nmfl}, no-op {n_noop}, "
+          f"clip-down {(dwp < 0).sum()} pts, clip-up {(dwp > 0).sum()}"
+          " pts")
+    out.update({f"mfl_in_{k}": v for k, v in mfl_ins.items()})
+    out.update(mfl_solve_type=mfl_solve_type,
+               mfl_out_xm=mfl_outs["xm"], mfl_out_wpxp=mfl_outs["wpxp"])
+
+    # ---- FILL: fill_holes_vertical "zt" direct --------------------
+    nfh = 10
+    fh_ins = {k: np.zeros((nfh, nz)) for k in
+              ["field", "rho_ds_zt", "rho_ds_zm"]}
+    fh_thr = np.zeros(nfh)
+    fh_out = np.zeros((nfh, nz))
+    for c in range(nfh):
+        env = _xp2_env(nz, np.maximum(zt, 0.0), np.maximum(zi, 0.0),
+                       rng)
+        thr = RT_TOL if c % 2 == 0 else THL_TOL
+        field = np.abs(rng.normal(3e-3, 2e-3, nz)) + thr
+        if c % 5 == 0:
+            field[10:14] = -2e-3          # deep local hole
+        elif c % 5 == 1:
+            field[30] = thr - 1e-9        # marginal hole
+        elif c % 5 == 2:
+            field[5:60:7] = -1e-4         # scattered holes
+        elif c % 5 == 3:
+            field[:] = thr + 1e-12        # near-threshold, no holes
+        else:
+            field[2:50] = -1e-3           # massive hole (unfillable)
+        fh_ins["field"][c] = field
+        fh_ins["rho_ds_zt"][c] = env["rho_ds_zt"]
+        fh_ins["rho_ds_zm"][c] = env["rho_ds_zm"]
+        fh_thr[c] = thr
+        fh_out[c] = d.drv_fill_holes_zt(thr, env["rho_ds_zt"],
+                                        env["rho_ds_zm"], field)
+    changed = (fh_out != fh_ins["field"]).any(axis=1)
+    assert changed.any() and (~changed).any()
+    print(f"fill_zt coverage: {changed.sum()}/{nfh} columns filled")
+    out.update({f"fh_in_{k}": v for k, v in fh_ins.items()})
+    out.update(fh_threshold=fh_thr, fh_out=fh_out)
+
+    return out
+
+
 def main(which=None):
     params, idx = eamv3_params()
     xp2_idx = {n: int(i) - 1 for n, i in
                zip(XP2_IDX_NAMES, d.drv_param_indices_xp2())}
     lscale_idx = {n: int(i) - 1 for n, i in
                   zip(LSCALE_IDX_NAMES, d.drv_param_indices_lscale())}
+    xm_wpxp_idx = {n: int(i) - 1 for n, i in
+                   zip(XM_WPXP_IDX_NAMES, d.drv_param_indices_xm_wpxp())}
     sha = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"],
                          capture_output=True, text=True).stdout.strip()
     meta = dict(
@@ -1547,6 +2083,26 @@ def main(which=None):
         param_indices={k: int(v) for k, v in idx.items()},
         xp2_param_indices=xp2_idx,
         lscale_param_indices=lscale_idx,
+        xm_wpxp_param_indices=xm_wpxp_idx,
+        xm_wpxp_config=dict(
+            l_iter=True,                  # compile-time parameter
+            l_clip_semi_implicit=False,
+            l_explicit_turbulent_adv_wpxp=False,
+            l_upwind_wpxp_ta=False,       # CENTERED wpxp turb. adv.
+            l_predict_upwp_vpwp=False, l_uv_nudge=False,
+            l_pos_def=False, l_hole_fill=True, l_clip_turb_adv=False,
+            l_diffuse_rtm_and_thlm=False,
+            l_stability_correct_Kh_N2_zm=False,
+            l_rtm_thlm_sponge_damp=False,
+            l_mono_flux_lim=True,         # compile-time parameter
+            l_mfl_xm_imp_adj=True,        # compile-time parameter
+            l_enable_relaxed_clipping=True,
+            l_constant_thickness=False,   # calc_turb_adv_range path
+            solver="dgbsv (band_solve; dgbsvx path needs the "
+                   "matrix-condition stats, off with l_stats=F)",
+            rt_tol_mfl=RT_TOL_MFL, thl_tol_mfl=THL_TOL_MFL,
+            mfl_max_xp2_rtm=5.0e-6, mfl_max_xp2_thlm=5.0,
+            relaxed_xp2_floor_rtm=1e-7, relaxed_xp2_floor_thlm=0.01),
         lscale_config=dict(
             # model_flags defaults; clubb_intr never overrides these
             # (EAMv3 clubb_stabcorrect=F only touches
@@ -1597,6 +2153,7 @@ def main(which=None):
         "pdf_driver": lambda: gen_pdf_driver(params, idx),
         "xp2": lambda: gen_xp2(params, idx),
         "lscale": lambda: gen_lscale(params, idx),
+        "xm_wpxp": lambda: gen_xm_wpxp(params, idx),
     }
     for name in (which or gens):
         np.savez_compressed(GOLDEN / f"clubb_{name}.npz", meta=meta_s,
