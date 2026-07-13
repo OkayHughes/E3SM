@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate CLUBB slice-1 goldens (run in the scream-dev container).
+"""Generate CLUBB goldens (run in the scream-dev container).
 
 Drives the REAL CLUBB Fortran (eam_clubb_f, the full unmodified stack,
 see build_clubb.py) exactly as EAM does and records golden archives:
@@ -22,6 +22,32 @@ see build_clubb.py) exactly as EAM does and records golden archives:
                                 saturated / cold-cirrus / randomized;
                                 plus the Skx and sigma_sqd_w helper
                                 inputs+outputs used to build them.
+  golden/clubb_pdf_driver.npz   pdf_closure_driver (slice B: the zt+zm
+                                double pdf_closure call plumbing,
+                                trapezoidal-rule vertical averaging,
+                                compute_cloud_cover, clip_rcm) over 40
+                                regime-sweeping columns with inputs on
+                                their native grids (moments on zm,
+                                means on zt), incl. a sharp-dry-notch
+                                family that exercises clip_rcm and the
+                                cloud-top/base branches of
+                                compute_cloud_cover; PLUS 8 "adv"
+                                cases whose inputs are REAL
+                                advance_clubb_core-advanced states.
+                                The verbatim extraction is validated
+                                during generation: the 8 adv cases
+                                assert BITWISE identity between the
+                                extracted pdf_closure_driver replayed
+                                on the post-advance state and the
+                                passthrough outputs of the real
+                                advance_clubb_core (EAMv3
+                                ipdf_call_placement=2 places the pdf
+                                call last, so its outputs reach the
+                                caller untouched).
+
+Run `python3 gen_clubb_golden.py [archive ...]` with archive names
+(grid/tridag/sat/pdf_closure/pdf_driver) to regenerate a subset;
+no arguments regenerates everything.
 
 EAMv3 tunable parameters: CLUBB compiled-in defaults from the real
 read_parameters(-99) with the namelist_defaults_eam.xml phys="default"
@@ -344,7 +370,293 @@ def gen_pdf_closure(params, idx):
     return out
 
 
-def main():
+OUTS_SLOTS = ["rcm", "cloud_frac", "ice_supersat_frac", "wprcp",
+              "sigma_sqd_w", "wpthvp", "wp2thvp", "rtpthvp", "thlpthvp",
+              "rc_coef", "rcm_in_layer", "cloud_cover", "rcp2_zt",
+              "thlprcp", "rc_coef_zm", "wp2rtp", "wp2thlp", "wp2rcp",
+              "rtprcp", "rcp2", "uprcp", "vprcp", "cloud_frac_zm",
+              "ice_supersat_frac_zm", "rtm_zm", "thlm_zm", "rcm_zm",
+              "rcm_supersat_adj", "sigma_sqd_w_zt"]
+
+DRIVER_IN_ZT = ["thlm", "rtm", "rtp3", "thlp3", "wp3", "wm_zt", "um",
+                "vm", "p", "exner", "thv_ds_zt", "rfrzm"]
+DRIVER_IN_ZM = ["wprtp", "wpthlp", "rtp2", "thlp2", "rtpthlp", "wp2",
+                "up2", "upwp", "vp2", "vpwp", "wm_zm", "thv_ds_zm"]
+DT_EAMV3 = 300.0  # clubb_timestep
+
+
+def _interp_zm(z_m, z_t, field_t):
+    """Simple linear resample of a zt-built profile onto zm heights
+    (input construction only -- NOT CLUBB's zt2zm)."""
+    return np.interp(z_m, z_t, field_t)
+
+
+def _build_driver_columns(nz, zt, zm, rng):
+    """40 regime-sweeping pdf_closure_driver input columns with each
+    field on its native grid (means/third-moments on zt, second
+    moments/fluxes on zm; CLUBB orientation, level 1 = surface/ghost).
+    Family 4 includes a sharp dry notch in rtm that drives rcm > rtm
+    at the notch after trapezoidal averaging (clip_rcm coverage) and
+    cloud-top/base transitions for compute_cloud_cover."""
+    ncol = 40
+    z_t = np.maximum(zt, 0.0)
+    z_m = np.maximum(zm, 0.0)
+    cols = {k: np.zeros((ncol, nz)) for k in DRIVER_IN_ZT + DRIVER_IN_ZM}
+
+    for c in range(ncol):
+        fam = c % 8
+        h = rng.uniform(7000.0, 8500.0)
+        p = 1.0e5 * np.exp(-z_t / h)
+        p[0] = p[1]
+        exner = (p / 1.0e5) ** (287.042 / 1004.64)
+        t_sfc = rng.uniform(275.0, 302.0)
+        lapse = rng.uniform(0.005, 0.0075)
+        T = np.maximum(t_sfc - lapse * z_t, 195.0)
+        thlm = T / exner
+        rsl, _ = d.drv_sat(p, T)
+
+        zpbl = rng.uniform(800.0, 2500.0)
+        bl_t = np.exp(-z_t / zpbl)
+        bl_m = np.exp(-z_m / zpbl)
+
+        if fam == 0:    # stable BL, negative skewness
+            rh = rng.uniform(0.3, 0.9)
+            wp2 = 0.02 * bl_m + 1e-3
+            skw_t = -rng.uniform(0.2, 1.5) * bl_t
+        elif fam == 1:  # convective, cloudy layer
+            rh = rng.uniform(0.85, 1.0)
+            wp2 = rng.uniform(0.3, 1.0) * bl_m + 1e-3
+            skw_t = rng.uniform(0.5, 2.5) * bl_t
+        elif fam == 2:  # extreme skewness, both signs
+            rh = rng.uniform(0.5, 1.0)
+            wp2 = rng.uniform(0.2, 0.8) * bl_m + 1e-3
+            skw_t = np.sign(rng.normal()) * rng.uniform(3.5, 4.4) * bl_t
+        elif fam == 3:  # degenerate wp2 (below w_tol_sqd)
+            rh = rng.uniform(0.4, 1.0)
+            wp2 = np.full(nz, rng.uniform(1e-6, 3e-4))
+            skw_t = np.zeros(nz)
+        elif fam == 4:  # saturated with a sharp one-level dry notch +
+                        # large rt variance: drives the trapezoidal rcm
+                        # above the notch rtm (clip_rcm coverage) and
+                        # cloud-top/base compute_cloud_cover branches
+            rh = rng.uniform(1.0, 1.06)
+            wp2 = 0.3 * bl_m + 1e-3
+            skw_t = rng.uniform(0.2, 1.0) * bl_t
+        elif fam == 5:  # saturated column (cf ~ 1)
+            rh = rng.uniform(1.01, 1.08)
+            wp2 = 0.4 * bl_m + 1e-3
+            skw_t = rng.uniform(0.3, 1.5) * bl_t
+        elif fam == 6:  # cold/cirrus emphasis (ice supersat branch)
+            rh = rng.uniform(0.7, 1.05)
+            wp2 = 0.05 + 0.2 * np.exp(-((z_m - 9000.0) / 2500.0) ** 2)
+            skw_t = 0.8 * np.exp(-((z_t - 9000.0) / 2500.0) ** 2)
+        else:           # randomized
+            rh = rng.uniform(0.2, 1.05)
+            wp2 = rng.uniform(1e-4, 1.2, nz) * bl_m + 5e-4
+            skw_t = rng.normal(0.0, 1.5, nz) * bl_t
+
+        rtm = np.clip(rh * rsl, 1e-7, 0.025)
+        if fam == 4:
+            k0 = rng.integers(6, 16)
+            rtm[k0] *= rng.uniform(5e-4, 2e-3)  # one-level dry notch
+
+        rtm_m = _interp_zm(z_m, z_t, rtm)
+        if fam == 4:
+            rtp2 = (rng.uniform(0.4, 0.55) * rtm_m) ** 2 + 1e-14
+        else:
+            rtp2 = (rng.uniform(0.02, 0.25) * rtm_m) ** 2 * bl_m + 1e-14
+        thlp2 = rng.uniform(0.05, 1.5) ** 2 * bl_m + 1e-6
+        if fam == 3:
+            rtp2[nz // 2:] = 1e-17          # below rt_tol^2
+            thlp2[: nz // 4] = 1e-5
+        corr_wrt = rng.uniform(-0.7, 0.9, nz)
+        corr_wthl = rng.uniform(-0.9, 0.7, nz)
+        corr_rtthl = rng.uniform(-0.95, 0.95, nz)
+        wprtp = corr_wrt * np.sqrt(wp2 * rtp2)
+        wpthlp = corr_wthl * np.sqrt(wp2 * thlp2)
+        rtpthlp = corr_rtthl * np.sqrt(rtp2 * thlp2)
+
+        wp2_t = _interp_zm(z_t, z_m, wp2)
+        wp3 = skw_t * wp2_t ** 1.5
+        rtp2_t = _interp_zm(z_t, z_m, rtp2)
+        thlp2_t = _interp_zm(z_t, z_m, thlp2)
+        rtp3 = rng.normal(0.0, 0.5, nz) * rtp2_t ** 1.5
+        thlp3 = rng.normal(0.0, 0.5, nz) * thlp2_t ** 1.5
+
+        um = 5.0 + 10.0 * np.tanh(z_t / 3000.0) + rng.normal(0, 2)
+        vm = -3.0 + rng.normal(0, 2) * bl_t
+        up2 = rng.uniform(0.05, 0.6) * bl_m + 1e-4
+        vp2 = rng.uniform(0.05, 0.6) * bl_m + 1e-4
+        upwp = rng.uniform(-0.6, 0.6, nz) * np.sqrt(wp2 * up2)
+        vpwp = rng.uniform(-0.6, 0.6, nz) * np.sqrt(wp2 * vp2)
+        wm_zt = rng.normal(0.0, 0.02, nz) * bl_t
+        wm_zm = _interp_zm(z_m, z_t, wm_zt)
+
+        thv_ds_zt = thlm.copy()
+        thv_ds_zm = _interp_zm(z_m, z_t, thlm)
+        rfrzm = np.zeros(nz)
+
+        for k, v in [("thlm", thlm), ("rtm", rtm), ("rtp3", rtp3),
+                     ("thlp3", thlp3), ("wp3", wp3), ("wm_zt", wm_zt),
+                     ("um", um), ("vm", vm), ("p", p), ("exner", exner),
+                     ("thv_ds_zt", thv_ds_zt), ("rfrzm", rfrzm),
+                     ("wprtp", wprtp), ("wpthlp", wpthlp),
+                     ("rtp2", rtp2), ("thlp2", thlp2),
+                     ("rtpthlp", rtpthlp), ("wp2", wp2), ("up2", up2),
+                     ("upwp", upwp), ("vp2", vp2), ("vpwp", vpwp),
+                     ("wm_zm", wm_zm), ("thv_ds_zm", thv_ds_zm)]:
+            cols[k][c] = v
+    return cols
+
+
+def _run_pdf_driver(cols, c):
+    args = [cols[k][c] for k in
+            ["wprtp", "thlm", "wpthlp", "rtp2", "rtp3", "thlp2",
+             "thlp3", "rtpthlp", "wp2", "wp3", "wm_zm", "wm_zt", "um",
+             "up2", "upwp", "vm", "vp2", "vpwp", "p", "exner",
+             "thv_ds_zm", "thv_ds_zt", "rfrzm", "rtm"]]
+    return d.drv_pdf_closure_driver(DT_EAMV3, *args)
+
+
+def gen_pdf_driver(params, idx):
+    zi, zt = eam_like_grid(73)
+    nz = zi.size
+    err = d.drv_setup(29, params, zi, zt)
+    assert err == 0
+    d.drv_set_eam_flags(2, True)  # EAMv3: ipdf placement 2, expldiff T
+
+    rng = np.random.default_rng(20260712)
+    cols = _build_driver_columns(nz, zt, zi, rng)
+    ncol = cols["p"].shape[0]
+
+    rtm_out = np.zeros((ncol, nz))
+    outs = np.zeros((ncol, nz, len(OUTS_SLOTS)))
+    pdfp_zt = np.zeros((ncol, nz, 47))
+    pdfp_zm = np.zeros((ncol, nz, 47))
+    for c in range(ncol):
+        ro, o, pz, pm, perr = _run_pdf_driver(cols, c)
+        assert perr == 0, (c, perr)
+        rtm_out[c] = ro
+        outs[c] = o
+        pdfp_zt[c] = pz
+        pdfp_zm[c] = pm
+        # l_rtm_nudge = .false.: rtm must pass through unchanged
+        assert np.array_equal(ro, cols["rtm"][c]), c
+
+    # Branch coverage sanity: cloud boundaries (compute_cloud_cover's
+    # partial-fill branch needs rcm crossing rc_tol) must occur.
+    rcm = outs[:, :, OUTS_SLOTS.index("rcm")]
+    crossings = ((rcm[:, 1:-1] >= 1e-6)
+                 & ((rcm[:, 2:] < 1e-6) | (rcm[:, :-2] < 1e-6))).sum()
+    assert crossings > 20, crossings
+
+    # ---- END-TO-END VALIDATION of the extraction + 8 "adv" cases ----
+    # Advance the real (public) advance_clubb_core one EAMv3 step from
+    # 8 of the synthetic columns; the passthrough outputs of its final
+    # (ipdf_call_placement=2) internal pdf_closure_driver call must be
+    # reproduced BITWISE by the extracted routine replayed on the
+    # advanced state.  The advanced states + outputs are recorded as
+    # extra golden cases (realistic covariance structure).
+    z_t = np.maximum(zt, 0.0)
+    adv_sel = list(range(8))
+    adv_in = {k: np.zeros((len(adv_sel), nz)) for k in
+              DRIVER_IN_ZT + DRIVER_IN_ZM}
+    adv_rtm_out = np.zeros((len(adv_sel), nz))
+    adv_outs = np.zeros((len(adv_sel), nz, len(OUTS_SLOTS)))
+    adv_pdfp_zt = np.zeros((len(adv_sel), nz, 47))
+    adv_pdfp_zm = np.zeros((len(adv_sel), nz, 47))
+    ned = 29
+    zero = np.zeros(nz)
+    passthrough = [("rcm", "prog", 17), ("cloud_frac", "prog", 18),
+                   ("wpthvp", "prog", 19), ("wp2thvp", "prog", 20),
+                   ("rtpthvp", "prog", 21), ("thlpthvp", "prog", 22),
+                   ("rcp2_zt", "diag", 2), ("thlprcp", "diag", 3),
+                   ("wprcp", "diag", 4), ("ice_supersat_frac", "diag", 5),
+                   ("rcm_in_layer", "diag", 6), ("cloud_cover", "diag", 7)]
+    for j, c in enumerate(adv_sel):
+        p = cols["p"][c]
+        exner = cols["exner"][c]
+        T = cols["thlm"][c] * exner
+        rho_t = p / (287.042 * T)
+        rho_ds_zt = rho_t.copy()
+        rho_ds_zt[0] = rho_ds_zt[1]
+        invrs_rho_ds_zt = 1.0 / rho_ds_zt
+        rho_ds_zm = _interp_zm(np.maximum(zi, 0.0), z_t, rho_ds_zt)
+        invrs_rho_ds_zm = 1.0 / rho_ds_zm
+        prog_in = np.column_stack(
+            [cols["um"][c], cols["vm"][c], cols["upwp"][c],
+             cols["vpwp"][c], cols["up2"][c], cols["vp2"][c],
+             cols["thlm"][c], cols["rtm"][c], cols["wprtp"][c],
+             cols["wpthlp"][c], cols["wp2"][c], cols["wp3"][c],
+             cols["rtp2"][c], cols["rtp3"][c], cols["thlp2"][c],
+             cols["thlp3"][c], cols["rtpthlp"][c], np.zeros(nz),
+             np.zeros(nz), np.zeros(nz), np.zeros(nz), np.zeros(nz),
+             np.zeros(nz)])
+        edsclr_in = np.zeros((nz, ned))
+        for jj in range(ned):
+            edsclr_in[:, jj] = (1.0 + 0.1 * jj) * np.exp(
+                -z_t / (2000.0 + 300.0 * jj))
+        edsclr_in[0, :] = edsclr_in[1, :]
+        prog_out, eds_out, diag, apz, apm, aerr = d.drv_advance_clubb_core(
+            DT_EAMV3, 1.0e-4, 0.0, 0.02, 5e-5, -0.05, 0.02,
+            100000.0, 100000.0,
+            zero, zero, zero, zero, zero, zero, zero, zero, zero,
+            cols["wm_zm"][c], cols["wm_zt"][c], p, rho_ds_zm, rho_t,
+            exner, rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm,
+            invrs_rho_ds_zt, cols["thv_ds_zm"][c], cols["thv_ds_zt"][c],
+            cols["rfrzm"][c], zero, prog_in, edsclr_in)
+        assert aerr == 0, (c, aerr)
+
+        # record the advanced state as pdf-driver inputs
+        st = {"um": prog_out[:, 0], "vm": prog_out[:, 1],
+              "upwp": prog_out[:, 2], "vpwp": prog_out[:, 3],
+              "up2": prog_out[:, 4], "vp2": prog_out[:, 5],
+              "thlm": prog_out[:, 6], "rtm": prog_out[:, 7],
+              "wprtp": prog_out[:, 8], "wpthlp": prog_out[:, 9],
+              "wp2": prog_out[:, 10], "wp3": prog_out[:, 11],
+              "rtp2": prog_out[:, 12], "rtp3": prog_out[:, 13],
+              "thlp2": prog_out[:, 14], "thlp3": prog_out[:, 15],
+              "rtpthlp": prog_out[:, 16]}
+        for k in DRIVER_IN_ZT + DRIVER_IN_ZM:
+            adv_in[k][j] = st.get(k, cols[k][c])
+
+        ro, o, pz, pm, perr = (lambda a: d.drv_pdf_closure_driver(
+            DT_EAMV3, a["wprtp"], a["thlm"], a["wpthlp"], a["rtp2"],
+            a["rtp3"], a["thlp2"], a["thlp3"], a["rtpthlp"], a["wp2"],
+            a["wp3"], cols["wm_zm"][c], cols["wm_zt"][c], a["um"],
+            a["up2"], a["upwp"], a["vm"], a["vp2"], a["vpwp"], p,
+            exner, cols["thv_ds_zm"][c], cols["thv_ds_zt"][c],
+            cols["rfrzm"][c], a["rtm"]))(st)
+        assert perr == 0, (c, perr)
+
+        # BITWISE identity between extraction replay and the real
+        # advance_clubb_core passthroughs
+        for name, kind, slot in passthrough:
+            adv_val = prog_out[:, slot] if kind == "prog" \
+                else diag[:, slot]
+            got = o[:, OUTS_SLOTS.index(name)]
+            assert np.array_equal(adv_val, got), (c, name)
+        assert np.array_equal(apz, pz), c
+        assert np.array_equal(apm, pm), c
+
+        adv_rtm_out[j] = ro
+        adv_outs[j] = o
+        adv_pdfp_zt[j] = pz
+        adv_pdfp_zm[j] = pm
+    print("extraction validated bitwise against advance_clubb_core "
+          f"on {len(adv_sel)} columns")
+
+    out = {f"in_{k}": v for k, v in cols.items()}
+    out.update({f"adv_in_{k}": v for k, v in adv_in.items()})
+    out.update(zi=zi, zt=zt, dt=np.array(DT_EAMV3),
+               rtm_out=rtm_out, outs=outs, pdfp_zt=pdfp_zt,
+               pdfp_zm=pdfp_zm, adv_rtm_out=adv_rtm_out,
+               adv_outs=adv_outs, adv_pdfp_zt=adv_pdfp_zt,
+               adv_pdfp_zm=adv_pdfp_zm)
+    return out
+
+
+def main(which=None):
     params, idx = eamv3_params()
     sha = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"],
                          capture_output=True, text=True).stdout.strip()
@@ -359,23 +671,30 @@ def main():
         config=dict(grid_type=3, l_implemented=True, sclr_dim=0,
                     hydromet_dim=0, edsclr_dim=29, theta0=300.0,
                     ts_nudge=86400.0, saturation_formula="flatau",
-                    iiPDF_type="ADG1", l_stats=False, debug_level=0),
+                    iiPDF_type="ADG1", l_stats=False, debug_level=0,
+                    dt=DT_EAMV3, ipdf_call_placement=2,
+                    l_do_expldiff_rtm_thlm=True,
+                    l_trapezoidal_rule_zt=True, l_trapezoidal_rule_zm=True,
+                    l_call_pdf_closure_twice=True, l_use_cloud_cover=True,
+                    l_use_ice_latent=False, l_rcm_supersat_adj=False,
+                    l_rtm_nudge=False, l_gamma_Skw=True),
+        outs_slots=OUTS_SLOTS,
     )
     meta_s = json.dumps(meta)
 
-    np.savez_compressed(GOLDEN / "clubb_grid.npz", meta=meta_s,
-                        params=params, **gen_grid())
-    print("wrote clubb_grid.npz")
-    np.savez_compressed(GOLDEN / "clubb_tridag.npz", meta=meta_s,
-                        **gen_tridag())
-    print("wrote clubb_tridag.npz")
-    np.savez_compressed(GOLDEN / "clubb_sat.npz", meta=meta_s,
-                        **gen_sat())
-    print("wrote clubb_sat.npz")
-    np.savez_compressed(GOLDEN / "clubb_pdf_closure.npz", meta=meta_s,
-                        params=params, **gen_pdf_closure(params, idx))
-    print("wrote clubb_pdf_closure.npz")
+    gens = {
+        "grid": lambda: gen_grid(),
+        "tridag": lambda: gen_tridag(),
+        "sat": lambda: gen_sat(),
+        "pdf_closure": lambda: gen_pdf_closure(params, idx),
+        "pdf_driver": lambda: gen_pdf_driver(params, idx),
+    }
+    for name in (which or gens):
+        np.savez_compressed(GOLDEN / f"clubb_{name}.npz", meta=meta_s,
+                            params=params, **gens[name]())
+        print(f"wrote clubb_{name}.npz")
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    main(sys.argv[1:] or None)

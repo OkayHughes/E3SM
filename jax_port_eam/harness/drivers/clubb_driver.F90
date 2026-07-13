@@ -1,5 +1,11 @@
-! f2py driver for the EAM CLUBB harness (slice 1: grid + saturation +
-! tridiag solver + Skx/sigma_sqd_w helpers + pdf_closure, ADG1 path).
+! f2py driver for the EAM CLUBB harness.
+! Slice A: grid + saturation + tridiag solver + Skx/sigma_sqd_w
+!          helpers + pdf_closure (ADG1 path).
+! Slice B: pdf_closure_driver (the zt+zm double pdf_closure call,
+!          trapezoidal-rule averaging, compute_cloud_cover, clip_rcm)
+!          via the verbatim extraction module clubb_pdf_extract (see
+!          build_clubb.py), plus the full advance_clubb_core for
+!          end-to-end validation of that extraction.
 !
 ! Setup mirrors EAM's clubb_intr.F90 exactly:
 !   clubb_ini_cam:  set_clubb_debug_level_api(0);
@@ -372,5 +378,343 @@ contains
     pdfp(:, 46) = pdf_params%ice_supersat_frac_1
     pdfp(:, 47) = pdf_params%ice_supersat_frac_2
   end subroutine drv_pdf_closure
+
+  !---------------------------------------------------------------------
+  ! Set the two model_flags module variables EAM's clubb_intr assigns
+  ! outside of setup_clubb_core_api: ipdf_call_placement (EAMv3
+  ! phys="default" namelist: clubb_ipdf_call_placement = 2 =
+  ! ipdf_post_advance_fields) and l_do_expldiff_rtm_thlm
+  ! (= do_expldiff, clubb_expldiff = .true. in EAMv3).  Only
+  ! advance_clubb_core reads them; pdf_closure_driver itself is
+  ! placement-independent.
+  subroutine drv_set_eam_flags(ipdf, l_expldiff)
+    use model_flags, only: ipdf_call_placement, l_do_expldiff_rtm_thlm
+    integer, intent(in) :: ipdf
+    logical, intent(in) :: l_expldiff
+    ipdf_call_placement = ipdf
+    l_do_expldiff_rtm_thlm = l_expldiff
+  end subroutine drv_set_eam_flags
+
+  !---------------------------------------------------------------------
+  ! pdf_closure_driver exactly as advance_clubb_core invokes it under
+  ! the EAMv3 configuration (hydromet_dim=0, sclr_dim=0, l_stats=F,
+  ! flags: l_gamma_Skw=T, l_call_pdf_closure_twice=T,
+  ! l_trapezoidal_rule_zt/zm=T, l_use_cloud_cover=T,
+  ! l_use_ice_latent=F, l_rcm_supersat_adj=F, l_rtm_nudge=F), via the
+  ! verbatim extraction module clubb_pdf_extract.
+  !
+  ! Level placement of the inputs (CLUBB orientation, index 1 =
+  ! surface): momentum-level: wprtp, wpthlp, rtp2, thlp2, rtpthlp,
+  ! wp2, up2, upwp, vp2, vpwp, wm_zm, thv_ds_zm; thermo-level: thlm,
+  ! rtm, rtp3, thlp3, wp3, wm_zt, um, vm, p_in_pa, exner, thv_ds_zt,
+  ! rfrzm.
+  !
+  ! outs(:,29) slots (only outputs DEFINED under the EAM config; the
+  ! intent(out) garbage slots wp4/wprtp2/wpthlp2/wprtpthlp/
+  ! Skw_velocity/rtm_frz/thlm_frz are not returned):
+  !   1 rcm            2 cloud_frac    3 ice_supersat_frac
+  !   4 wprcp          5 sigma_sqd_w   6 wpthvp     7 wp2thvp
+  !   8 rtpthvp        9 thlpthvp     10 rc_coef   11 rcm_in_layer
+  !  12 cloud_cover   13 rcp2_zt      14 thlprcp   15 rc_coef_zm
+  !  16 wp2rtp        17 wp2thlp      18 wp2rcp    19 rtprcp
+  !  20 rcp2          21 uprcp        22 vprcp     23 cloud_frac_zm
+  !  24 ice_supersat_frac_zm  25 rtm_zm  26 thlm_zm  27 rcm_zm
+  !  28 rcm_supersat_adj      29 sigma_sqd_w_zt (module diagnostic
+  !                              set by the routine)
+  subroutine drv_pdf_closure_driver(nz, dt, wprtp, thlm, wpthlp, &
+      rtp2, rtp3, thlp2, thlp3, rtpthlp, wp2, wp3, wm_zm, wm_zt, &
+      um, up2, upwp, vm, vp2, vpwp, p_in_pa, exner, thv_ds_zm, &
+      thv_ds_zt, rfrzm, rtm, rtm_out, outs, pdfp_zt, pdfp_zm, err_out)
+    use clubb_pdf_extract, only: pdf_closure_driver
+    use clubb_driver_helpers, only: pack_pdf_params
+    use pdf_parameter_module, only: pdf_parameter, implicit_coefs_terms, &
+        init_pdf_params
+    use variables_diagnostic_module, only: sigma_sqd_w_zt
+    use error_code, only: err_code, clubb_no_error
+    integer, intent(in) :: nz
+    real(r8), intent(in) :: dt
+    real(r8), intent(in), dimension(nz) :: wprtp, thlm, wpthlp, rtp2, &
+        rtp3, thlp2, thlp3, rtpthlp, wp2, wp3, wm_zm, wm_zt, um, up2, &
+        upwp, vm, vp2, vpwp, p_in_pa, exner, thv_ds_zm, thv_ds_zt, &
+        rfrzm, rtm
+    real(r8), intent(out) :: rtm_out(nz)
+    real(r8), intent(out) :: outs(nz, 29)
+    real(r8), intent(out) :: pdfp_zt(nz, 47), pdfp_zm(nz, 47)
+    integer, intent(out) :: err_out
+
+    real(r8), dimension(nz) :: rtm_loc
+    real(r8), dimension(nz, 0) :: hydromet, wphydrometp, wp2hmp, &
+        rtphmp_zt, thlphmp_zt, sclrm, wpsclrp, sclrp2, sclrprtp, &
+        sclrpthlp, sclrpthvp, wp2sclrp, wpsclrp2, sclrprcp, &
+        wpsclrprtp, wpsclrpthlp
+    real(r8), dimension(nz) :: rcm, cloud_frac, ice_supersat_frac, &
+        wprcp, sigma_sqd_w, wpthvp, wp2thvp, rtpthvp, thlpthvp, &
+        rc_coef, rcm_in_layer, cloud_cover, rcp2_zt, thlprcp, &
+        rc_coef_zm, rtm_frz, thlm_frz, wp4, wp2rtp, wprtp2, wp2thlp, &
+        wpthlp2, wprtpthlp, wp2rcp, rtprcp, rcp2, uprcp, vprcp, &
+        skw_velocity, cloud_frac_zm, ice_supersat_frac_zm, rtm_zm, &
+        thlm_zm, rcm_zm, rcm_supersat_adj
+    type(pdf_parameter) :: pdf_params, pdf_params_frz, pdf_params_zm
+    type(implicit_coefs_terms), dimension(nz) :: pdf_ict
+
+    call init_pdf_params(nz, pdf_params)
+    call init_pdf_params(nz, pdf_params_frz)
+    call init_pdf_params(nz, pdf_params_zm)
+
+    rtm_loc = rtm
+    err_code = clubb_no_error
+
+    ! Sentinel-fill the outputs the EAM configuration never computes,
+    ! so they are deterministic locals (not recorded).
+    wp4 = -9999._r8
+    wprtp2 = -9999._r8
+    wpthlp2 = -9999._r8
+    wprtpthlp = -9999._r8
+    skw_velocity = -9999._r8
+    rtm_frz = -9999._r8
+    thlm_frz = -9999._r8
+
+    call pdf_closure_driver( dt, 0, wprtp,                 & ! Intent(in)
+                             thlm, wpthlp, rtp2, rtp3,     & ! Intent(in)
+                             thlp2, thlp3, rtpthlp, wp2,   & ! Intent(in)
+                             wp3, wm_zm, wm_zt,            & ! Intent(in)
+                             um, up2, upwp,                & ! Intent(in)
+                             vm, vp2, vpwp,                & ! Intent(in)
+                             p_in_pa, exner,               & ! Intent(in)
+                             thv_ds_zm, thv_ds_zt,         & ! Intent(in)
+                             rfrzm, hydromet, wphydrometp, & ! Intent(in)
+                             wp2hmp, rtphmp_zt, thlphmp_zt,& ! Intent(in)
+                             sclrm, wpsclrp, sclrp2,       & ! Intent(in)
+                             sclrprtp, sclrpthlp,          & ! Intent(in)
+                             .false.,                      & ! Intent(in)
+                             rtm_loc,                      & ! Intent(i/o)
+                             rcm, cloud_frac,              & ! Intent(out)
+                             ice_supersat_frac, wprcp,     & ! Intent(out)
+                             sigma_sqd_w, wpthvp, wp2thvp, & ! Intent(out)
+                             rtpthvp, thlpthvp, rc_coef,   & ! Intent(out)
+                             rcm_in_layer, cloud_cover,    & ! Intent(out)
+                             rcp2_zt, thlprcp, rc_coef_zm, & ! Intent(out)
+                             rtm_frz, thlm_frz, sclrpthvp, & ! Intent(out)
+                             wp4, wp2rtp, wprtp2, wp2thlp, & ! Intent(out)
+                             wpthlp2, wprtpthlp, wp2rcp,   & ! Intent(out)
+                             rtprcp, rcp2,                 & ! Intent(out)
+                             uprcp, vprcp,                 & ! Intent(out)
+                             skw_velocity,                 & ! Intent(out)
+                             cloud_frac_zm,                & ! Intent(out)
+                             ice_supersat_frac_zm,         & ! Intent(out)
+                             rtm_zm, thlm_zm, rcm_zm,      & ! Intent(out)
+                             rcm_supersat_adj,             & ! Intent(out)
+                             wp2sclrp, wpsclrp2, sclrprcp, & ! Intent(out)
+                             wpsclrprtp, wpsclrpthlp,      & ! Intent(out)
+                             pdf_params, pdf_params_frz,   & ! Intent(out)
+                             pdf_params_zm,                & ! Intent(out)
+                             pdf_ict )                       ! Intent(out)
+
+    err_out = err_code
+    err_code = clubb_no_error
+
+    rtm_out = rtm_loc
+    outs(:, 1) = rcm
+    outs(:, 2) = cloud_frac
+    outs(:, 3) = ice_supersat_frac
+    outs(:, 4) = wprcp
+    outs(:, 5) = sigma_sqd_w
+    outs(:, 6) = wpthvp
+    outs(:, 7) = wp2thvp
+    outs(:, 8) = rtpthvp
+    outs(:, 9) = thlpthvp
+    outs(:, 10) = rc_coef
+    outs(:, 11) = rcm_in_layer
+    outs(:, 12) = cloud_cover
+    outs(:, 13) = rcp2_zt
+    outs(:, 14) = thlprcp
+    outs(:, 15) = rc_coef_zm
+    outs(:, 16) = wp2rtp
+    outs(:, 17) = wp2thlp
+    outs(:, 18) = wp2rcp
+    outs(:, 19) = rtprcp
+    outs(:, 20) = rcp2
+    outs(:, 21) = uprcp
+    outs(:, 22) = vprcp
+    outs(:, 23) = cloud_frac_zm
+    outs(:, 24) = ice_supersat_frac_zm
+    outs(:, 25) = rtm_zm
+    outs(:, 26) = thlm_zm
+    outs(:, 27) = rcm_zm
+    outs(:, 28) = rcm_supersat_adj
+    outs(:, 29) = sigma_sqd_w_zt
+
+    call pack_pdf_params(nz, pdf_params, pdfp_zt)
+    call pack_pdf_params(nz, pdf_params_zm, pdfp_zm)
+  end subroutine drv_pdf_closure_driver
+
+  !---------------------------------------------------------------------
+  ! The REAL (public) advance_clubb_core, driven exactly as EAM's
+  ! clubb_tend_cam does (see clubb_intr.F90; edsclrm_forcing = 0 and
+  ! wpedsclrp_sfc = 0 as in EAM, pert pointers unassociated).  Used to
+  ! validate the clubb_pdf_extract transcription END-TO-END: under
+  ! ipdf_call_placement = 2 (EAMv3) the final pdf_closure_driver call
+  ! inside advance_clubb_core produces outputs that pass through to
+  ! the caller untouched, and its inputs are exactly the advanced
+  ! prognostic state returned here -- so replaying
+  ! drv_pdf_closure_driver on prog_out must reproduce them bitwise.
+  !
+  ! prog(:,23) slots (in and out):
+  !   1 um   2 vm   3 upwp  4 vpwp  5 up2  6 vp2  7 thlm  8 rtm
+  !   9 wprtp  10 wpthlp  11 wp2  12 wp3  13 rtp2  14 rtp3
+  !  15 thlp2  16 thlp3  17 rtpthlp  18 rcm  19 cloud_frac
+  !  20 wpthvp  21 wp2thvp  22 rtpthvp  23 thlpthvp
+  ! diag(:,8) slots:
+  !   1 khzm  2 khzt  3 qclvar(=rcp2_zt)  4 thlprcp_out  5 wprcp
+  !   6 ice_supersat_frac  7 rcm_in_layer  8 cloud_cover
+  subroutine drv_advance_clubb_core(nz, ned, dt, fcor, sfc_elevation, &
+      wpthlp_sfc, wprtp_sfc, upwp_sfc, vpwp_sfc, host_dx, host_dy, &
+      thlm_forcing, rtm_forcing, um_forcing, vm_forcing, &
+      wprtp_forcing, wpthlp_forcing, rtp2_forcing, thlp2_forcing, &
+      rtpthlp_forcing, wm_zm, wm_zt, p_in_pa, rho_zm, rho, exner, &
+      rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm, invrs_rho_ds_zt, &
+      thv_ds_zm, thv_ds_zt, rfrzm, radf, prog_in, edsclrm_in, &
+      prog_out, edsclrm_out, diag_out, pdfp_zt, pdfp_zm, err_out)
+    use clubb_api_module, only: advance_clubb_core_api
+    use clubb_driver_helpers, only: pack_pdf_params
+    use pdf_parameter_module, only: pdf_parameter, init_pdf_params
+    use error_code, only: err_code, clubb_no_error
+    integer, intent(in) :: nz, ned
+    real(r8), intent(in) :: dt, fcor, sfc_elevation, wpthlp_sfc, &
+        wprtp_sfc, upwp_sfc, vpwp_sfc, host_dx, host_dy
+    real(r8), intent(in), dimension(nz) :: thlm_forcing, rtm_forcing, &
+        um_forcing, vm_forcing, wprtp_forcing, wpthlp_forcing, &
+        rtp2_forcing, thlp2_forcing, rtpthlp_forcing, wm_zm, wm_zt, &
+        p_in_pa, rho_zm, rho, exner, rho_ds_zm, rho_ds_zt, &
+        invrs_rho_ds_zm, invrs_rho_ds_zt, thv_ds_zm, thv_ds_zt, &
+        rfrzm, radf
+    real(r8), intent(in) :: prog_in(nz, 23)
+    real(r8), intent(in) :: edsclrm_in(nz, ned)
+    real(r8), intent(out) :: prog_out(nz, 23)
+    real(r8), intent(out) :: edsclrm_out(nz, ned)
+    real(r8), intent(out) :: diag_out(nz, 8)
+    real(r8), intent(out) :: pdfp_zt(nz, 47), pdfp_zm(nz, 47)
+    integer, intent(out) :: err_out
+
+    real(r8), dimension(nz) :: um, vm, upwp, vpwp, up2, vp2, thlm, &
+        rtm, wprtp, wpthlp, wp2, wp3, rtp2, rtp3, thlp2, thlp3, &
+        rtpthlp, rcm, cloud_frac, wpthvp, wp2thvp, rtpthvp, thlpthvp
+    real(r8), dimension(nz) :: khzm, khzt, qclvar, thlprcp_out, &
+        wprcp, ice_supersat_frac, rcm_in_layer, cloud_cover
+    real(r8), dimension(nz, ned) :: edsclrm, edsclrm_forcing
+    real(r8), dimension(ned) :: wpedsclrp_sfc
+    real(r8), dimension(nz, 0) :: hydromet, wphydrometp, wp2hmp, &
+        rtphmp_zt, thlphmp_zt, sclrm, wpsclrp, sclrp2, sclrprtp, &
+        sclrpthlp, sclrm_forcing, sclrpthvp
+    real(r8), dimension(0) :: wpsclrp_sfc
+    type(pdf_parameter) :: pdf_params, pdf_params_zm
+    integer :: err_code_api
+    real(r8), pointer :: upwp_sfc_pert => null(), vpwp_sfc_pert => null()
+    real(r8), pointer, dimension(:) :: um_pert => null(), &
+        vm_pert => null(), upwp_pert => null(), vpwp_pert => null()
+
+    call init_pdf_params(nz, pdf_params)
+    call init_pdf_params(nz, pdf_params_zm)
+
+    um = prog_in(:, 1)
+    vm = prog_in(:, 2)
+    upwp = prog_in(:, 3)
+    vpwp = prog_in(:, 4)
+    up2 = prog_in(:, 5)
+    vp2 = prog_in(:, 6)
+    thlm = prog_in(:, 7)
+    rtm = prog_in(:, 8)
+    wprtp = prog_in(:, 9)
+    wpthlp = prog_in(:, 10)
+    wp2 = prog_in(:, 11)
+    wp3 = prog_in(:, 12)
+    rtp2 = prog_in(:, 13)
+    rtp3 = prog_in(:, 14)
+    thlp2 = prog_in(:, 15)
+    thlp3 = prog_in(:, 16)
+    rtpthlp = prog_in(:, 17)
+    rcm = prog_in(:, 18)
+    cloud_frac = prog_in(:, 19)
+    wpthvp = prog_in(:, 20)
+    wp2thvp = prog_in(:, 21)
+    rtpthvp = prog_in(:, 22)
+    thlpthvp = prog_in(:, 23)
+    edsclrm = edsclrm_in
+    edsclrm_forcing = 0._r8
+    wpedsclrp_sfc = 0._r8
+
+    err_code = clubb_no_error
+    err_code_api = clubb_no_error
+
+    call advance_clubb_core_api( &
+        .true., dt, fcor, sfc_elevation, 0,                & ! intent(in)
+        thlm_forcing, rtm_forcing, um_forcing, vm_forcing, & ! intent(in)
+        sclrm_forcing, edsclrm_forcing, wprtp_forcing,     & ! intent(in)
+        wpthlp_forcing, rtp2_forcing, thlp2_forcing,       & ! intent(in)
+        rtpthlp_forcing, wm_zm, wm_zt,                     & ! intent(in)
+        wpthlp_sfc, wprtp_sfc, upwp_sfc, vpwp_sfc,         & ! intent(in)
+        wpsclrp_sfc, wpedsclrp_sfc,                        & ! intent(in)
+        p_in_pa, rho_zm, rho, exner,                       & ! intent(in)
+        rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm,             & ! intent(in)
+        invrs_rho_ds_zt, thv_ds_zm, thv_ds_zt, hydromet,   & ! intent(in)
+        rfrzm, radf,                                       & ! intent(in)
+        wphydrometp, wp2hmp, rtphmp_zt, thlphmp_zt,        & ! intent(in)
+        host_dx, host_dy,                                  & ! intent(in)
+        um, vm, upwp, vpwp, up2, vp2,                      & ! intent(inout)
+        thlm, rtm, wprtp, wpthlp,                          & ! intent(inout)
+        wp2, wp3, rtp2, rtp3, thlp2, thlp3, rtpthlp,       & ! intent(inout)
+        sclrm,                                             & ! intent(inout)
+        sclrp2, sclrprtp, sclrpthlp,                       & ! intent(inout)
+        wpsclrp, edsclrm, err_code_api,                    & ! intent(inout)
+        rcm, cloud_frac,                                   & ! intent(inout)
+        wpthvp, wp2thvp, rtpthvp, thlpthvp,                & ! intent(inout)
+        sclrpthvp,                                         & ! intent(inout)
+        pdf_params, pdf_params_zm,                         & ! intent(inout)
+        khzm, khzt, qclvar, thlprcp_out,                   & ! intent(out)
+        wprcp, ice_supersat_frac,                          & ! intent(out)
+        rcm_in_layer, cloud_cover,                         & ! intent(out)
+        upwp_sfc_pert, vpwp_sfc_pert,                      & ! intent(in)
+        um_pert, vm_pert, upwp_pert, vpwp_pert )             ! intent(inout)
+
+    err_out = err_code_api
+    err_code = clubb_no_error
+
+    prog_out(:, 1) = um
+    prog_out(:, 2) = vm
+    prog_out(:, 3) = upwp
+    prog_out(:, 4) = vpwp
+    prog_out(:, 5) = up2
+    prog_out(:, 6) = vp2
+    prog_out(:, 7) = thlm
+    prog_out(:, 8) = rtm
+    prog_out(:, 9) = wprtp
+    prog_out(:, 10) = wpthlp
+    prog_out(:, 11) = wp2
+    prog_out(:, 12) = wp3
+    prog_out(:, 13) = rtp2
+    prog_out(:, 14) = rtp3
+    prog_out(:, 15) = thlp2
+    prog_out(:, 16) = thlp3
+    prog_out(:, 17) = rtpthlp
+    prog_out(:, 18) = rcm
+    prog_out(:, 19) = cloud_frac
+    prog_out(:, 20) = wpthvp
+    prog_out(:, 21) = wp2thvp
+    prog_out(:, 22) = rtpthvp
+    prog_out(:, 23) = thlpthvp
+    edsclrm_out = edsclrm
+
+    diag_out(:, 1) = khzm
+    diag_out(:, 2) = khzt
+    diag_out(:, 3) = qclvar
+    diag_out(:, 4) = thlprcp_out
+    diag_out(:, 5) = wprcp
+    diag_out(:, 6) = ice_supersat_frac
+    diag_out(:, 7) = rcm_in_layer
+    diag_out(:, 8) = cloud_cover
+
+    call pack_pdf_params(nz, pdf_params, pdfp_zt)
+    call pack_pdf_params(nz, pdf_params_zm, pdfp_zm)
+  end subroutine drv_advance_clubb_core
 
 end module clubb_driver

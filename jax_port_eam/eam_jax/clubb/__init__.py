@@ -1,7 +1,8 @@
-"""JAX port of EAMv3 CLUBB — slice 1 (see PORTING_PLAN.md row 12).
+"""JAX port of EAMv3 CLUBB — slices A and B (see PORTING_PLAN.md
+row 12).
 
-Delivered in this slice, all validated against the eam_clubb_f f2py
-harness (the ENTIRE unmodified components/eam/src/physics/clubb stack
+Delivered so far, all validated against the eam_clubb_f f2py harness
+(the ENTIRE unmodified components/eam/src/physics/clubb stack
 compiled with EAM's defines -DCLUBB_CAM -DCLUBB_SGS
 -DCLUBB_REAL_TYPE=dp; see harness/build_clubb.py):
 
@@ -23,6 +24,18 @@ compiled with EAM's defines -DCLUBB_CAM -DCLUBB_SGS
                   correlations, chi/eta transform, cloud fraction /
                   liquid water / ice supersaturation fraction, the
                   x'rc' contributions and the th_v moments).
+- pdf_closure_driver.py  (slice B) pdf_closure_driver as
+                  advance_clubb_core invokes it: skewness/sigma_sqd_w
+                  assembly, the zt+zm double pdf_closure call
+                  (l_call_pdf_closure_twice=T), trapezoidal-rule
+                  vertical averaging (l_trapezoidal_rule_zt/zm=T),
+                  clip_rcm, compute_cloud_cover and the
+                  l_use_cloud_cover substitution.  Goldened against a
+                  verbatim extraction of the private Fortran routine
+                  that is itself validated BITWISE end-to-end against
+                  the public advance_clubb_core (EAMv3
+                  ipdf_call_placement=2 puts the pdf call last, so its
+                  outputs pass through untouched).
 
 EAM configuration baked into the port scope (all verbatim from
 clubb_intr.F90 + model_flags.F90 defaults; goldens use the same):
@@ -39,4 +52,5 @@ coupling read_parameters applies); the goldens record the full packed
 params vector.
 """
 
-from . import grid, pdf_closure, saturation, tridiag  # noqa: F401
+from . import (grid, pdf_closure, pdf_closure_driver,  # noqa: F401
+               saturation, tridiag)
