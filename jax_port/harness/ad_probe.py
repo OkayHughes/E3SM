@@ -177,7 +177,8 @@ def main():
             jnp.asarray(s["inv_qc_relvar"]),
             jnp.asarray(s["precip_liq_surf_mass"]),
             jnp.asarray(s["precip_ice_surf_mass"]),
-            phys.p3_tables, phys.p3_opts)
+            phys.p3_tables, phys.p3_opts,
+            sed_use_while_loop=False)
         return out["qc"] + out["qr"]
     results.append(probe("p3            d(sum qc+qr out)/d(qc)", p3_f,
                          s["qc"]))

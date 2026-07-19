@@ -8,16 +8,23 @@ Sources (components/eamxx/src/physics/p3/impl/):
 
 EAMxx always calls these with kdir = -1 (k=0 at model top, kbot = nlev-1 at
 the surface); only that orientation is implemented. The C++ per-column
-while(dt_left > tol) CFL substepping becomes, by default, a fixed-length
-lax.scan over batched columns (reverse-mode differentiable, unlike
-lax.while_loop): every step selects per column, with a pure jnp.where on
-each carry component, between the substep result and the incoming carry,
-so columns whose dt_left is already spent pass through bitwise unchanged
-and the result is bit-identical to the while_loop as long as the static
-bound MAX_SEDI_SUBSTEPS_* covers the actual trip count. Each returned
-dict carries a per-column "converged" flag (dt_left <= tol at the end)
-guarding against silent truncation; the original while_loop is kept
-behind use_while_loop=True as the reference for equivalence tests. The
+while(dt_left > tol) CFL substepping has two bit-identical realizations
+selected by the static `use_while_loop` flag:
+
+- use_while_loop=True (DEFAULT — the fast primal path for production
+  runs without autodiff): the direct lax.while_loop transcription.
+  NOT reverse-mode differentiable (jax.grad raises).
+- use_while_loop=False (SWITCH TO THIS FOR AUTODIFF, e.g. via
+  p3 opts["sed_use_while_loop"] = False): a fixed-length lax.scan over
+  batched columns; every step selects per column, with a pure jnp.where
+  on each carry component, between the substep result and the incoming
+  carry, so columns whose dt_left is already spent pass through bitwise
+  unchanged and the result is bit-identical to the while_loop as long
+  as the static bound MAX_SEDI_SUBSTEPS_* covers the actual trip count
+  (~5.5x slower primal at the default 4x-margin bounds).
+
+Each returned dict carries a per-column "converged" flag (dt_left <= tol
+at the end) guarding against silent truncation in scan mode. The
 moving active band [k_qxtop, k_qxbot] is realized as boolean masks
 against a level-index array; levels outside the band keep their values,
 and the zero incoming flux at the band top falls out of fluxes being
@@ -161,7 +168,7 @@ def cloud_sedimentation(qc_incld, rho, inv_rho, cld_frac_l, acn, inv_dz,
                         dt, inv_dt, do_predict_nc: bool,
                         qc, nc, nc_incld, mu_c, lamc,
                         qc_tend_in, nc_tend_in, precip_liq_surf_in,
-                        max_substeps=None, use_while_loop=False):
+                        max_substeps=None, use_while_loop=True):
     """Functions::cloud_sedimentation. Returns a dict with qc, nc,
     qc_incld, nc_incld, mu_c, lamc, qc_tend, nc_tend, precip_liq_surf,
     converged (per-column: dt spent within the substep bound).
@@ -272,7 +279,7 @@ def rain_sedimentation(rho, inv_rho, rhofacr, cld_frac_r, inv_dz, qr_incld,
                        qr, nr, nr_incld, mu_r, lamr,
                        precip_liq_flux_in, qr_tend_in, nr_tend_in,
                        precip_liq_surf_in, opts,
-                       max_substeps=None, use_while_loop=False):
+                       max_substeps=None, use_while_loop=True):
     """Functions::rain_sedimentation. Returns a dict with qr, nr,
     qr_incld, nr_incld, mu_r, lamr, precip_liq_flux (nlev+1 interfaces),
     qr_tend, nr_tend, precip_liq_surf (accumulated: in + contribution),
@@ -364,7 +371,7 @@ def ice_sedimentation(rho, inv_rho, rhofaci, cld_frac_i, inv_dz,
                       qi, qi_incld, ni, ni_incld, qm, qm_incld,
                       bm, bm_incld, ice_table_vals,
                       qi_tend_in, ni_tend_in, precip_ice_surf_in, opts,
-                      max_substeps=None, use_while_loop=False):
+                      max_substeps=None, use_while_loop=True):
     """Functions::ice_sedimentation. Returns a dict with qi, ni, qm, bm,
     their in-cloud values, qi_tend, ni_tend, precip_ice_surf (accumulated),
     converged (per-column: dt spent within the substep bound).

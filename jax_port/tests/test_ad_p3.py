@@ -241,7 +241,7 @@ def test_substep_bound_through_p3_main(golden):
         calculate_drymmr_from_wetmmr_dp_based(
             s["qv_prev_micro_step"], s["pseudo_density"],
             s["pseudo_density_dry"]),
-        s["T_prev_micro_step"], zcol, zcol, zcol, g["tbl"], g["opts"])
+        s["T_prev_micro_step"], zcol, zcol, zcol, g["tbl"], g["opts"], sed_use_while_loop=False)
     conv = np.asarray(out["sed_converged"])
     assert conv.all(), (
         f"p3_main: {(~conv).sum()} of {conv.size} golden columns did not "
@@ -304,7 +304,7 @@ def _process_scalar(golden, wrt, of):
             fields["T_prev_micro_step"], fields["nc_nuceat_tend"], None,
             fields["ni_activated"], fields["inv_qc_relvar"],
             fields["precip_liq_surf_mass"], fields["precip_ice_surf_mass"],
-            g["tbl"], g["opts"])
+            g["tbl"], g["opts"], sed_use_while_loop=False)
         return sum(jnp.sum(out[k]) for k in of)
 
     return scalar, jnp.asarray(_sub(s[wrt], n))

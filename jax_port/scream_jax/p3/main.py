@@ -43,7 +43,8 @@ def _sel(col_mask, a, b):
 
 @functools.partial(jax.jit, static_argnames=(
     "predict_nc", "prescribed_ccn", "do_ice_production",
-    "use_hetfrz_classnuc", "use_separate_ice_liq_frac"))
+    "use_hetfrz_classnuc", "use_separate_ice_liq_frac",
+    "sed_use_while_loop"))
 def p3_main(dt,
             predict_nc: bool, prescribed_ccn: bool,
             do_ice_production: bool, use_hetfrz_classnuc: bool,
@@ -57,7 +58,7 @@ def p3_main(dt,
             hetfrz_immersion_nucleation_tend,
             hetfrz_contact_nucleation_tend,
             hetfrz_deposition_nucleation_tend,
-            tables, opts):
+            tables, opts, sed_use_while_loop=True):
     """One P3 step. Returns a dict with the updated prognostics and all
     diagnostic outputs (see the return statement)."""
     inv_dt = 1.0 / dt
@@ -118,21 +119,24 @@ def p3_main(dt,
         g["qc_incld"], rho, inv_rho, cld_frac_l, acn, inv_dz,
         dt, inv_dt, predict_nc,
         g["qc"], g["nc"], g["nc_incld"], g["mu_c"], g["lamc"],
-        zcol, zcol, jnp.zeros(zcol.shape[:-1]))
+        zcol, zcol, jnp.zeros(zcol.shape[:-1]),
+        use_while_loop=sed_use_while_loop)
 
     rsed = rain_sedimentation(
         rho, inv_rho, rhofacr, cld_frac_r, inv_dz, g["qr_incld"],
         tables["vn_table_vals"], tables["vm_table_vals"], dt, inv_dt,
         g["qr"], g["nr"], g["nr_incld"], g["mu_r"], g["lamr"],
         jnp.zeros(zcol.shape[:-1] + (zcol.shape[-1] + 1,)), zcol, zcol,
-        jnp.zeros(zcol.shape[:-1]), opts)
+        jnp.zeros(zcol.shape[:-1]), opts,
+        use_while_loop=sed_use_while_loop)
 
     ised = ice_sedimentation(
         rho, inv_rho, rhofaci, cld_frac_i, inv_dz, dt, inv_dt,
         g["qi"], g["qi_incld"], g["ni"], g["ni_incld"],
         g["qm"], g["qm_incld"], g["bm"], g["bm_incld"],
         tables["ice_table_vals"], zcol, zcol,
-        jnp.zeros(zcol.shape[:-1]), opts)
+        jnp.zeros(zcol.shape[:-1]), opts,
+        use_while_loop=sed_use_while_loop)
 
     sed = dict(g)
     sed["qc"], sed["nc"] = csed["qc"], csed["nc"]

@@ -34,7 +34,7 @@ _WATER_KEYS = ("qc", "nc", "qr", "nr", "qi", "ni", "qm", "bm", "qv")
     "predict_nc", "prescribed_ccn", "do_ice_production",
     "use_hetfrz_classnuc", "use_separate_ice_liq_frac",
     "set_cld_frac_l_to_one", "set_cld_frac_i_to_one",
-    "set_cld_frac_r_to_one"))
+    "set_cld_frac_r_to_one", "sed_use_while_loop"))
 def p3_process_step(dt,
                     predict_nc: bool, prescribed_ccn: bool,
                     do_ice_production: bool, use_hetfrz_classnuc: bool,
@@ -52,7 +52,8 @@ def p3_process_step(dt,
                     cldfrac_liq_in=None, cldfrac_ice_in=None,
                     hetfrz_immersion_nucleation_tend=None,
                     hetfrz_contact_nucleation_tend=None,
-                    hetfrz_deposition_nucleation_tend=None):
+                    hetfrz_deposition_nucleation_tend=None,
+                    sed_use_while_loop=True):
     """One P3 process step (one AD subcycle). Returns a dict of updated /
     computed EAMxx fields keyed by their EAMxx field names."""
     T_mid = jnp.asarray(T_mid)
@@ -112,7 +113,8 @@ def p3_process_step(dt,
         cld_frac_i, cld_frac_l, cld_frac_r,
         p_dry_mid, dz, pseudo_density_dry, inv_exner,
         qv_prev_dry, T_prev_micro_step,
-        hetfrz[0], hetfrz[1], hetfrz[2], tables, opts)
+        hetfrz[0], hetfrz[1], hetfrz[2], tables, opts,
+        sed_use_while_loop=sed_use_while_loop)
 
     # ---------------- p3_postamble ----------------
     # rescaled temperature update: T += (T(th_new) - T_before)*dp_dry/dp

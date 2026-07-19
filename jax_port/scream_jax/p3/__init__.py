@@ -11,6 +11,11 @@ from . import tables
 # Scalar runtime options with the C++ defaults (P3Runtime in
 # p3_functions.hpp). The boolean P3Runtime members are separate static
 # arguments of the ported functions, not opts entries.
+# NOTE on autodiff: p3_main / p3_process_step take a static kwarg
+# sed_use_while_loop (default True = fast lax.while_loop primal, NOT
+# reverse-mode differentiable). Pass sed_use_while_loop=False for
+# autodiff (bounded masked lax.scan, bit-identical primal, ~5.5x
+# slower; see p3/sedimentation.py docstring).
 DEFAULT_OPTS = {
     "max_total_ni": 740.0e3,
     "autoconversion_prefactor": 1350.0,
