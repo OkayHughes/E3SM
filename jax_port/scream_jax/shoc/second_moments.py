@@ -77,10 +77,14 @@ def shoc_diag_second_moments_srf(wthl_sfc, uw_sfc, vw_sfc):
     """
     wthl_sfc = jnp.asarray(wthl_sfc)
     ustar2 = jnp.sqrt(jnp.asarray(uw_sfc) ** 2 + jnp.asarray(vw_sfc) ** 2)
-    wstar = jnp.where(
-        wthl_sfc >= 0.0,
-        jnp.cbrt(jnp.maximum(0.0, (1.0 / c.basetemp) * c.gravit * wthl_sfc)),
-        0.0)
+    # where(wthl_sfc >= 0, cbrt(max(0, coef*wthl_sfc)), 0) rewritten with
+    # the double-where idiom: cbrt'(0) is inf, so reverse-mode AD NaNs on
+    # wthl_sfc < 0 lanes. coef > 0, and cbrt(0) = 0 matches the fallback,
+    # so the primal is unchanged.
+    warg = jnp.maximum(0.0, (1.0 / c.basetemp) * c.gravit * wthl_sfc)
+    warg_pos = warg > 0.0
+    wstar = jnp.where(warg_pos,
+                      jnp.cbrt(jnp.where(warg_pos, warg, 1.0)), 0.0)
     return ustar2, wstar
 
 

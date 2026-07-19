@@ -95,8 +95,15 @@ def _pdf_scalar_parameters(wxsec, sqrtw2, sqrtx, xsec, x_first,
     x1_1 = jnp.where(cond, tmp2 * sqrtx + x_first, default_first)
     x1_2 = jnp.where(cond, tmp1 * sqrtx + x_first, default_first)
 
-    sqrtx2_1 = jnp.where(cond, jnp.sqrt(x2_1), 0.0)
-    sqrtx2_2 = jnp.where(cond, jnp.sqrt(x2_2), 0.0)
+    # Double-where so reverse-mode AD never differentiates sqrt at 0
+    # (x2_* is exactly 0 on masked-out or clipped-to-zero lanes; sqrt(0)=0
+    # so the primal is unchanged).
+    x2_1_pos = x2_1 > 0.0
+    x2_2_pos = x2_2 > 0.0
+    sqrtx2_1 = jnp.where(x2_1_pos,
+                         jnp.sqrt(jnp.where(x2_1_pos, x2_1, 1.0)), 0.0)
+    sqrtx2_2 = jnp.where(x2_2_pos,
+                         jnp.sqrt(jnp.where(x2_2_pos, x2_2, 1.0)), 0.0)
     return x1_1, x1_2, x2_1, x2_2, sqrtx2_1, sqrtx2_2
 
 
@@ -200,10 +207,14 @@ def shoc_assumed_pdf_compute_s(qw1, qs, beta, pval, thl2, qw2,
         * beta * qs * (pval / c.P0) ** (c.Rair / c.CP)
     cqt = 1.0 / (1.0 + beta * qs)
 
-    std_s = jnp.sqrt(jnp.maximum(
-        0.0,
-        cthl ** 2 * thl2 + cqt ** 2 * qw2
-        - 2.0 * cthl * sqrtthl2 * cqt * sqrtqw2 * r_qwthl))
+    # std_s = sqrt(max(0, var_s)), written with the double-where idiom so
+    # reverse-mode AD never differentiates sqrt at 0 (var_s <= 0 on lanes
+    # with no SGS variance; sqrt(0) = 0 so the primal is unchanged).
+    var_s = (cthl ** 2 * thl2 + cqt ** 2 * qw2
+             - 2.0 * cthl * sqrtthl2 * cqt * sqrtqw2 * r_qwthl)
+    var_s_pos = var_s > 0.0
+    std_s = jnp.where(var_s_pos,
+                      jnp.sqrt(jnp.where(var_s_pos, var_s, 1.0)), 0.0)
     s = qw1 - qs * ((1.0 + beta * qw1) / (1.0 + beta * qs))
 
     tiny_floor = jnp.sqrt(jnp.finfo(jnp.float64).tiny) * 100.0

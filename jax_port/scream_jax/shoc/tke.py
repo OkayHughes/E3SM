@@ -140,7 +140,13 @@ def eddy_diffusivities(ckh, ckm, pblh, zt_grid, tabs, shoc_mix,
         pblh = pblh[..., None]
 
     condition = (zt_grid < pblh + pbl_trans) & (tabs[..., -1:] < tabs_crit)
-    stable_form = shoc_mix ** 2 * jnp.sqrt(sterm_zt)
+    # Double-where: sterm_zt is floored at exactly 0 by linear_interp, and
+    # differentiating sqrt at 0 NaNs the reverse pass even on lanes where
+    # the other where-branch is selected. sqrt(0) = 0, primal unchanged.
+    sterm_pos = sterm_zt > 0.0
+    sqrt_sterm = jnp.where(sterm_pos,
+                           jnp.sqrt(jnp.where(sterm_pos, sterm_zt, 1.0)), 0.0)
+    stable_form = shoc_mix ** 2 * sqrt_sterm
     tkh = jnp.where(condition, ckh_s * stable_form, ckh * isotropy * tke)
     tk = jnp.where(condition, ckm_s * stable_form, ckm * isotropy * tke)
     return tkh, tk
