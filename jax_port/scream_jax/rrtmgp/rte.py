@@ -173,8 +173,13 @@ def lw_solver_noscat(tau, lay_source, lev_source_inc, lev_source_dec,
 
     tau_loc = tau * D
     trans = jnp.exp(-tau_loc)
-    fact = jnp.where(tau_loc > tau_thresh,
-                     (1.0 - trans) / jnp.where(tau_loc == 0.0, 1.0, tau_loc)
+    # double-where: sanitize the denominator with the SAME predicate as
+    # the branch selection so 0 < tau_loc <= tau_thresh never produces a
+    # huge 1/tau_loc in the unselected branch (NaN-safe under AD;
+    # bit-neutral on the primal).
+    use_exact = tau_loc > tau_thresh
+    fact = jnp.where(use_exact,
+                     (1.0 - trans) / jnp.where(use_exact, tau_loc, 1.0)
                      - trans,
                      tau_loc * (0.5 - 1.0 / 3.0 * tau_loc))
     source_dn = (1.0 - trans) * lev_source_dn \

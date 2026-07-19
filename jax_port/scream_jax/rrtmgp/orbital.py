@@ -5,10 +5,13 @@ shr_orb_decl, shr_orb_cosz / shr_orb_avg_cosz [Zhou et al. 2015]) and
 components/eamxx/src/share/physics/eamxx_trcmix.cpp.
 
 shr_orb_params/decl are scalar host-side numpy (called once per step);
-cosz and trcmix are vectorized over columns.
+cosz is vectorized over columns but stays host-side numpy (it depends
+only on calendar day / lat / lon, never on prognostic state). trcmix
+takes the state-dependent p_mid, so it is pure jnp and traceable.
 """
 
 import numpy as np
+import jax.numpy as jnp
 
 _PI = np.pi
 _PSECDEG = 1.0 / 3600.0
@@ -251,14 +254,14 @@ O2MMR = 0.23143
 
 def trcmix(name, clat_deg, pmid, co2vmr, n2ovmr, ch4vmr, f11vmr, f12vmr):
     """eamxx trcmix: (ncol, nlay) mass mixing ratio for the named gas.
-    clat_deg in degrees."""
-    clat_r = np.asarray(clat_deg) * _PI / 180.0
-    pmid = np.asarray(pmid)
+    clat_deg in degrees. Pure jnp (pmid is state-dependent)."""
+    clat_r = jnp.asarray(clat_deg) * _PI / 180.0
+    pmid = jnp.asarray(pmid)
 
     if name == "o2":
-        return np.full_like(pmid, O2MMR)
+        return jnp.full_like(pmid, O2MMR)
     if name == "co2":
-        return np.full_like(pmid, _MW["co2"] / MWDRY * co2vmr)
+        return jnp.full_like(pmid, _MW["co2"] / MWDRY * co2vmr)
 
     params = {
         "ch4": (_MW["ch4"] / MWDRY * ch4vmr, 0.2353, 0.0, 0.2353, 0.0225489),
@@ -270,8 +273,13 @@ def trcmix(name, clat_deg, pmid, co2vmr, n2ovmr, ch4vmr, f11vmr, f12vmr):
                   0.024444),
     }
     trop_mmr, s1b, s1f, s2b, s2f = params[name]
-    dlat = np.abs(57.2958 * clat_r)[:, None]
-    scale = np.where(dlat <= 45.0, s1b + s1f * dlat, s2b + s2f * (dlat - 45.0))
-    ptrop = 250.0e2 - 150.0e2 * np.cos(clat_r)[:, None] ** 2
-    return np.where(pmid >= ptrop, trop_mmr,
-                    trop_mmr * (pmid / ptrop) ** scale)
+    dlat = jnp.abs(57.2958 * clat_r)[:, None]
+    scale = jnp.where(dlat <= 45.0, s1b + s1f * dlat,
+                      s2b + s2f * (dlat - 45.0))
+    ptrop = 250.0e2 - 150.0e2 * jnp.cos(clat_r)[:, None] ** 2
+    # broadcast the divisor to full shape BEFORE dividing: XLA rewrites
+    # x / broadcast(y) as x * broadcast(1/y) (1-ulp difference vs numpy);
+    # same-shape division is exact IEEE and matches numpy bitwise
+    ptrop_b = jnp.broadcast_to(ptrop, pmid.shape)
+    return jnp.where(pmid >= ptrop_b, trop_mmr,
+                     trop_mmr * (pmid / ptrop_b) ** scale)

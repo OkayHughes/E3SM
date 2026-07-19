@@ -69,7 +69,13 @@ def interpolation(kd, play, tlay, col_gas):
     cg2 = jnp.moveaxis(jnp.take(col_gas, flavor[1] + 1, axis=-1), -1, 0)[None]
 
     col_mix = cg1 + ratio_eta_half * cg2
-    eta = jnp.where(col_mix > 2.0 * _TINY, cg1 / jnp.where(col_mix == 0.0, 1.0, col_mix), 0.5)
+    # double-where: sanitize the denominator with the SAME predicate that
+    # selects the branch, so the unselected branch never divides by a
+    # (sub)normal-tiny value (which would poison AD with inf*0=NaN).
+    # Bit-neutral on the primal: selected elements divide by col_mix as
+    # before, unselected ones take 0.5 either way.
+    use_div = col_mix > 2.0 * _TINY
+    eta = jnp.where(use_div, cg1 / jnp.where(use_div, col_mix, 1.0), 0.5)
     loceta = eta * (neta - 1.0)
     jeta = jnp.minimum(loceta.astype(jnp.int32) + 1, neta - 1) - 1
     feta = jnp.mod(loceta, 1.0)
@@ -257,8 +263,11 @@ def compute_gas_taus(kd, play, plev, tlay, vmr, col_dry=None):
     if kd["krayl"] is not None:
         tau_rayleigh = compute_tau_rayleigh(kd, interp, col_gas, col_dry)
         t = tau + tau_rayleigh
-        ssa = jnp.where(t > 2.0 * _TINY,
-                        tau_rayleigh / jnp.where(t == 0.0, 1.0, t), 0.0)
+        # double-where (see interpolation): guard the denominator with
+        # the selecting predicate so AD never sees a tiny-denominator div
+        use_div = t > 2.0 * _TINY
+        ssa = jnp.where(use_div,
+                        tau_rayleigh / jnp.where(use_div, t, 1.0), 0.0)
         optics = {"tau": t, "ssa": ssa, "g": jnp.zeros_like(t)}
     else:
         optics = {"tau": tau}
