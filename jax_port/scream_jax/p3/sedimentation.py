@@ -8,12 +8,20 @@ Sources (components/eamxx/src/physics/p3/impl/):
 
 EAMxx always calls these with kdir = -1 (k=0 at model top, kbot = nlev-1 at
 the surface); only that orientation is implemented. The C++ per-column
-while(dt_left > tol) CFL substepping becomes a lax.while_loop over batched
-columns: the loop runs until every column's dt_left is spent, with
-already-finished columns masked out of all updates. The moving active band
-[k_qxtop, k_qxbot] is realized as boolean masks against a level-index
-array; levels outside the band keep their values, and the zero incoming
-flux at the band top falls out of fluxes being zero outside the band.
+while(dt_left > tol) CFL substepping becomes, by default, a fixed-length
+lax.scan over batched columns (reverse-mode differentiable, unlike
+lax.while_loop): every step selects per column, with a pure jnp.where on
+each carry component, between the substep result and the incoming carry,
+so columns whose dt_left is already spent pass through bitwise unchanged
+and the result is bit-identical to the while_loop as long as the static
+bound MAX_SEDI_SUBSTEPS_* covers the actual trip count. Each returned
+dict carries a per-column "converged" flag (dt_left <= tol at the end)
+guarding against silent truncation; the original while_loop is kept
+behind use_while_loop=True as the reference for equivalence tests. The
+moving active band [k_qxtop, k_qxbot] is realized as boolean masks
+against a level-index array; levels outside the band keep their values,
+and the zero incoming flux at the band top falls out of fluxes being
+zero outside the band.
 
 Columns with no condensate (log_qxpresent false) start with dt_left = 0 so
 the loop body never touches them, matching the C++ early exit.
@@ -29,6 +37,58 @@ from ..foundation import constants as c
 from .dsd import get_cloud_dsd2, get_rain_dsd2, _tgamma
 from .table_lookups import lookup_table3, apply_table3, lookup_ice, apply_table_ice
 from .main_part3 import calc_bulk_rho_rime
+
+# Static substep bounds for the masked-scan CFL loops. Measured maximum
+# GLOBAL trip counts (iterations until every column's dt is spent) on the
+# golden states — p3_218x72_dt1800_5steps (218 cols, 5 steps, dt=1800),
+# physics_suite_218x72_dt1800_2steps states run at dt=300 and dt=1800,
+# and the property-test inputs incl. the thin-layer CFL stress case:
+#   cloud:  6  (dt=1800; dt=300: 1, thin-layer dt=1800 stress: 6)
+#   rain: 421  (dt=1800; dt=300: 109)
+#   ice:  297  (dt=1800; dt=300:  64)
+# Bounds are ~4x the observed max (minimum 32). Truncation is guarded by
+# the returned "converged" flag and asserted in tests.
+MAX_SEDI_SUBSTEPS_CLOUD = 32
+MAX_SEDI_SUBSTEPS_RAIN = 1684
+MAX_SEDI_SUBSTEPS_ICE = 1188
+
+
+def _masked_substep_scan(body, carry, length):
+    """Fixed-length, reverse-differentiable replacement for the
+    while(dt_left > tol) substep loops (dt_left is carry[-3]).
+
+    Runs `body` `length` times under lax.scan. Each step selects, per
+    column, between the body's result and the incoming carry with a pure
+    jnp.where on every carry component: columns whose dt_left is already
+    spent pass through bitwise unchanged, so the result is bit-identical
+    to the lax.while_loop whenever `length` covers the actual trip count
+    (see MAX_SEDI_SUBSTEPS_*). The step is wrapped in jax.checkpoint so
+    reverse-mode memory stays linear in `length` with cheap recompute.
+    """
+    def step(carry, _):
+        active = carry[-3] > c.dt_left_tol
+        new = body(carry)
+        merged = tuple(
+            jnp.where(
+                active.reshape(active.shape + (1,) * (n.ndim - active.ndim)),
+                n, o)
+            for n, o in zip(new, carry))
+        return merged, None
+
+    final, _ = lax.scan(jax.checkpoint(step), carry, None, length=length)
+    return final
+
+
+def assert_converged(sed_out, name="sedimentation"):
+    """Host-side guard against silent substep truncation (tests/debug):
+    raises if any column's CFL loop did not spend its full dt within the
+    static substep bound."""
+    import numpy as np
+    conv = np.asarray(sed_out["converged"])
+    if not conv.all():
+        raise RuntimeError(
+            f"{name}: {int((~conv).sum())} column(s) did not exhaust dt "
+            "within MAX_SEDI_SUBSTEPS; raise the bound")
 
 
 def find_top_bottom(q, small):
@@ -95,13 +155,16 @@ def _generalized_substep(fields, velocities, rho, inv_rho, inv_dz, idx,
     return fields, fluxes, k_qxbot, dt_left, prt_accum
 
 
-@functools.partial(jax.jit, static_argnames=("do_predict_nc",))
+@functools.partial(jax.jit, static_argnames=("do_predict_nc", "max_substeps",
+                                             "use_while_loop"))
 def cloud_sedimentation(qc_incld, rho, inv_rho, cld_frac_l, acn, inv_dz,
                         dt, inv_dt, do_predict_nc: bool,
                         qc, nc, nc_incld, mu_c, lamc,
-                        qc_tend_in, nc_tend_in, precip_liq_surf_in):
+                        qc_tend_in, nc_tend_in, precip_liq_surf_in,
+                        max_substeps=None, use_while_loop=False):
     """Functions::cloud_sedimentation. Returns a dict with qc, nc,
-    qc_incld, nc_incld, mu_c, lamc, qc_tend, nc_tend, precip_liq_surf.
+    qc_incld, nc_incld, mu_c, lamc, qc_tend, nc_tend, precip_liq_surf,
+    converged (per-column: dt spent within the substep bound).
 
     precip_liq_surf is SET (not accumulated) where cloud water is present,
     as in the C++."""
@@ -164,8 +227,13 @@ def cloud_sedimentation(qc_incld, rho, inv_rho, cld_frac_l, acn, inv_dz,
 
     carry = (qc, nc, qc_incld, nc_incld, mu_c, lamc,
              dt_left0, prt0, k_qxbot0)
+    if use_while_loop:
+        final = lax.while_loop(cond, body, carry)
+    else:
+        n = MAX_SEDI_SUBSTEPS_CLOUD if max_substeps is None else max_substeps
+        final = _masked_substep_scan(body, carry, n)
     (qc, nc, qc_incld, nc_incld, mu_c, lamc,
-     _, prt_accum, _) = lax.while_loop(cond, body, carry)
+     dt_left, prt_accum, _) = final
 
     precip_liq_surf = jnp.where(
         present, prt_accum * c.INV_RHO_H2O * inv_dt,
@@ -176,6 +244,7 @@ def cloud_sedimentation(qc_incld, rho, inv_rho, cld_frac_l, acn, inv_dz,
         "qc_tend": (qc - jnp.asarray(qc_tend_in)) * inv_dt,
         "nc_tend": (nc - jnp.asarray(nc_tend_in)) * inv_dt,
         "precip_liq_surf": precip_liq_surf,
+        "converged": dt_left <= c.dt_left_tol,
     }
 
 
@@ -196,15 +265,18 @@ def compute_rain_fall_velocity(vn_table_vals, vm_table_vals, qr_incld,
     return nr_incld, mu_r, lamr, V_qr, V_nr
 
 
-@jax.jit
+@functools.partial(jax.jit, static_argnames=("max_substeps",
+                                             "use_while_loop"))
 def rain_sedimentation(rho, inv_rho, rhofacr, cld_frac_r, inv_dz, qr_incld,
                        vn_table_vals, vm_table_vals, dt, inv_dt,
                        qr, nr, nr_incld, mu_r, lamr,
                        precip_liq_flux_in, qr_tend_in, nr_tend_in,
-                       precip_liq_surf_in, opts):
+                       precip_liq_surf_in, opts,
+                       max_substeps=None, use_while_loop=False):
     """Functions::rain_sedimentation. Returns a dict with qr, nr,
     qr_incld, nr_incld, mu_r, lamr, precip_liq_flux (nlev+1 interfaces),
-    qr_tend, nr_tend, precip_liq_surf (accumulated: in + contribution)."""
+    qr_tend, nr_tend, precip_liq_surf (accumulated: in + contribution),
+    converged (per-column: dt spent within the substep bound)."""
     qr, nr = jnp.asarray(qr), jnp.asarray(nr)
     qr_incld, nr_incld = jnp.asarray(qr_incld), jnp.asarray(nr_incld)
     mu_r, lamr = jnp.asarray(mu_r), jnp.asarray(lamr)
@@ -264,8 +336,13 @@ def rain_sedimentation(rho, inv_rho, rhofacr, cld_frac_r, inv_dz, qr_incld,
 
     carry = (qr, nr, qr_incld, nr_incld, mu_r, lamr, precip_liq_flux,
              dt_left0, prt0, k_qxbot0)
+    if use_while_loop:
+        final = lax.while_loop(cond, body, carry)
+    else:
+        n = MAX_SEDI_SUBSTEPS_RAIN if max_substeps is None else max_substeps
+        final = _masked_substep_scan(body, carry, n)
     (qr, nr, qr_incld, nr_incld, mu_r, lamr, precip_liq_flux,
-     _, prt_accum, _) = lax.while_loop(cond, body, carry)
+     dt_left, prt_accum, _) = final
 
     precip_liq_surf = (jnp.asarray(precip_liq_surf_in)
                        + jnp.where(present,
@@ -276,17 +353,21 @@ def rain_sedimentation(rho, inv_rho, rhofacr, cld_frac_r, inv_dz, qr_incld,
         "qr_tend": (qr - jnp.asarray(qr_tend_in)) * inv_dt,
         "nr_tend": (nr - jnp.asarray(nr_tend_in)) * inv_dt,
         "precip_liq_surf": precip_liq_surf,
+        "converged": dt_left <= c.dt_left_tol,
     }
 
 
-@jax.jit
+@functools.partial(jax.jit, static_argnames=("max_substeps",
+                                             "use_while_loop"))
 def ice_sedimentation(rho, inv_rho, rhofaci, cld_frac_i, inv_dz,
                       dt, inv_dt,
                       qi, qi_incld, ni, ni_incld, qm, qm_incld,
                       bm, bm_incld, ice_table_vals,
-                      qi_tend_in, ni_tend_in, precip_ice_surf_in, opts):
+                      qi_tend_in, ni_tend_in, precip_ice_surf_in, opts,
+                      max_substeps=None, use_while_loop=False):
     """Functions::ice_sedimentation. Returns a dict with qi, ni, qm, bm,
-    their in-cloud values, qi_tend, ni_tend, precip_ice_surf (accumulated).
+    their in-cloud values, qi_tend, ni_tend, precip_ice_surf (accumulated),
+    converged (per-column: dt spent within the substep bound).
     qm and bm advect with the mass-weighted velocity V_qit."""
     qi, ni = jnp.asarray(qi), jnp.asarray(ni)
     qm, bm = jnp.asarray(qm), jnp.asarray(bm)
@@ -357,8 +438,13 @@ def ice_sedimentation(rho, inv_rho, rhofaci, cld_frac_i, inv_dz,
 
     carry = (qi, ni, qm, bm, qi_incld, ni_incld, qm_incld, bm_incld,
              dt_left0, prt0, k_qxbot0)
+    if use_while_loop:
+        final = lax.while_loop(cond, body, carry)
+    else:
+        n = MAX_SEDI_SUBSTEPS_ICE if max_substeps is None else max_substeps
+        final = _masked_substep_scan(body, carry, n)
     (qi, ni, qm, bm, qi_incld, ni_incld, qm_incld, bm_incld,
-     _, prt_accum, _) = lax.while_loop(cond, body, carry)
+     dt_left, prt_accum, _) = final
 
     precip_ice_surf = (jnp.asarray(precip_ice_surf_in)
                        + jnp.where(present,
@@ -370,6 +456,7 @@ def ice_sedimentation(rho, inv_rho, rhofaci, cld_frac_i, inv_dz,
         "qi_tend": (qi - jnp.asarray(qi_tend_in)) * inv_dt,
         "ni_tend": (ni - jnp.asarray(ni_tend_in)) * inv_dt,
         "precip_ice_surf": precip_ice_surf,
+        "converged": dt_left <= c.dt_left_tol,
     }
 
 

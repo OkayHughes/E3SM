@@ -218,4 +218,8 @@ def p3_main(dt,
         "qc_sed_tend": jnp.where(run3[..., None], csed["qc_tend"], 0.0),
         "qr_sed_tend": jnp.where(run3[..., None], rsed["qr_tend"], 0.0),
         "qi_sed_tend": jnp.where(run3[..., None], ised["qi_tend"], 0.0),
+        # per-column guard against silent CFL-substep truncation in the
+        # fixed-length sedimentation scans (see sedimentation.py)
+        "sed_converged": (csed["converged"] & rsed["converged"]
+                          & ised["converged"]),
     }
