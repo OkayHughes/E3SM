@@ -271,3 +271,27 @@ defaulting mirroring `pre_process_tracer_requests`; **subfield data-pointer
 bug** (`get()` used the parent block's base pointer for monolithic-group
 subfields, so qv/qc/tke snapshots all aliased the block start — data
 pointer now taken from the typed subview).
+
+## Automatic differentiation hardening (2026-07 session)
+
+Measured baseline and progress live in `harness/ad_probe.py` (grad/jvp/
+FD per process on golden states). Current state — every process step
+now has running, NaN-free reverse-mode gradients, with primals
+bit-identical to the validated code (all changes primal-bit-neutral by
+construction; suite at 185 tests green):
+
+| Process | reverse grad | notes |
+|---|---|---|
+| cld_fraction | runs, ≡0 by physics (binary) | `smooth_width>0` opt-in surrogate gives finite gradients (foundation/smoothing.py, approximation-by-identity: width=0 is bitwise the hard op) |
+| shoc | NaN-free, dot-product identity vs FD-validated jvp at 1e-12 | 4 unsafe-where sqrt/cbrt sites fixed |
+| p3 | NaN-free through the full step | sedimentation while_loops -> bounded masked scans (bitwise-equal primal; `use_while_loop=True` escape hatch, scan default ~5.5x slower primal; `sed_converged` guards truncation) |
+| rrtmgp | NaN-free; FD-vs-jvp 2e-5 | traced path pure jnp (52/52 outputs bit-identical incl. an XLA reciprocal-multiply pitfall); MCICA mask gradients structurally zero w.r.t. cldfrac (expected) |
+
+Remaining AD roadmap: smoothing adoption at further jump sites (P3
+qsmall gates, SHOC branches — physics-judgment pass); lax.custom_linear_solve
+for tridiag solves; custom_root wrappers for iterative solvers as they
+enter (CAAS projection via its scalar dual root per Blondel et al.
+2022); an expected-overlap differentiable radiation mode if gradients
+w.r.t. cloud fraction through radiation are needed; suite-level
+checkpointing strategy for reverse mode through the 6-substep mac_mic
+loop.
