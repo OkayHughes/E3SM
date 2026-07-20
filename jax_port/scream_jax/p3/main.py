@@ -45,7 +45,8 @@ def _sel(col_mask, a, b):
 @functools.partial(jax.jit, static_argnames=(
     "predict_nc", "prescribed_ccn", "do_ice_production",
     "use_hetfrz_classnuc", "use_separate_ice_liq_frac",
-    "sed_use_while_loop", "smooth_width", "smooth_families"))
+    "sed_use_while_loop", "smooth_width", "smooth_families",
+    "sed_mode", "p3_soft_masks"))
 def p3_main(dt,
             predict_nc: bool, prescribed_ccn: bool,
             do_ice_production: bool, use_hetfrz_classnuc: bool,
@@ -60,13 +61,25 @@ def p3_main(dt,
             hetfrz_contact_nucleation_tend,
             hetfrz_deposition_nucleation_tend,
             tables, opts, sed_use_while_loop=True,
-            smooth_width=0.0, smooth_families=None):
+            smooth_width=0.0, smooth_families=None,
+            sed_mode=None, p3_soft_masks=False):
     """One P3 step. Returns a dict with the updated prognostics and all
     diagnostic outputs (see the return statement).
 
     smooth_width / smooth_families (static): approximation-by-identity
     smoothing of P3's jump discontinuities; 0.0 (default) is the exact
-    bitwise-original scheme (see scream_jax.p3.SMOOTH_FAMILIES)."""
+    bitwise-original scheme (see scream_jax.p3.SMOOTH_FAMILIES).
+
+    sed_mode (static): sedimentation realization, "while" | "scan" |
+    "uniform" (see p3/sedimentation.py). None (default) defers to the
+    legacy sed_use_while_loop flag (True -> "while", False -> "scan").
+
+    p3_soft_masks (static): when True, the hard active/run3 column
+    where-gates around the part2 / sedimentation / homogeneous-freezing /
+    part3 section are DISABLED — every column takes the computed values
+    (compute everywhere). Only meaningful for the differentiable modes
+    (removes the columns' early-exit discreteness from the graph); with
+    hard masks off, inactive columns' contributions are O(qsmall)."""
     inv_dt = 1.0 / dt
     inv_exner = jnp.asarray(inv_exner)
     dz = jnp.asarray(dz)
@@ -106,14 +119,25 @@ def p3_main(dt,
         cld_frac_i, cld_frac_l, cld_frac_r, qv_prev, t_prev, st, opts,
         smooth_width=smooth_width, smooth_families=smooth_families)
 
+    # soft-mask option: disable the hard active/run3 column where-gates
+    # (compute everywhere; inactive columns contribute O(qsmall))
+    if p3_soft_masks:
+        def sell(col_mask, a, b):
+            return a
+
+        selc = sell
+    else:
+        sell = _sel
+        selc = jnp.where
+
     # first early exit: inactive columns keep their part1 state
-    g = {k: _sel(active, g2[k], st[k]) for k in _STATE_KEYS}
+    g = {k: sell(active, g2[k], st[k]) for k in _STATE_KEYS}
     for k in ("qc_incld", "qr_incld", "qi_incld", "qm_incld",
               "nc_incld", "nr_incld", "ni_incld", "bm_incld",
               "mu_c", "lamc", "mu_r", "lamr"):
         base = st[k] if k in st else zcol
-        g[k] = _sel(active, g2[k], base)
-    diags = {k: _sel(active, v, zcol) for k, v in diags.items()}
+        g[k] = sell(active, g2[k], base)
+    diags = {k: sell(active, v, zcol) for k, v in diags.items()}
     # second exit mask: sed/homog-freezing/part3 run only where
     # hydrometeors remain after part2 (in an active column)
     run3 = active & hydro2
@@ -127,7 +151,7 @@ def p3_main(dt,
         dt, inv_dt, predict_nc,
         g["qc"], g["nc"], g["nc_incld"], g["mu_c"], g["lamc"],
         zcol, zcol, jnp.zeros(zcol.shape[:-1]),
-        use_while_loop=sed_use_while_loop)
+        use_while_loop=sed_use_while_loop, sed_mode=sed_mode)
 
     rsed = rain_sedimentation(
         rho, inv_rho, rhofacr, cld_frac_r, inv_dz, g["qr_incld"],
@@ -135,7 +159,7 @@ def p3_main(dt,
         g["qr"], g["nr"], g["nr_incld"], g["mu_r"], g["lamr"],
         jnp.zeros(zcol.shape[:-1] + (zcol.shape[-1] + 1,)), zcol, zcol,
         jnp.zeros(zcol.shape[:-1]), opts,
-        use_while_loop=sed_use_while_loop)
+        use_while_loop=sed_use_while_loop, sed_mode=sed_mode)
 
     ised = ice_sedimentation(
         rho, inv_rho, rhofaci, cld_frac_i, inv_dz, dt, inv_dt,
@@ -143,7 +167,7 @@ def p3_main(dt,
         g["qm"], g["qm_incld"], g["bm"], g["bm_incld"],
         tables["ice_table_vals"], zcol, zcol,
         jnp.zeros(zcol.shape[:-1]), opts,
-        use_while_loop=sed_use_while_loop)
+        use_while_loop=sed_use_while_loop, sed_mode=sed_mode)
 
     sed = dict(g)
     sed["qc"], sed["nc"] = csed["qc"], csed["nc"]
@@ -179,30 +203,30 @@ def p3_main(dt,
     # second early exit: only run3 columns take the sed/freeze/part3 result
     out_state = {}
     for k in ("qv", "th_atm", "qc", "nc", "qr", "nr", "qi", "ni", "qm", "bm"):
-        out_state[k] = _sel(run3, p3[k], g[k])
+        out_state[k] = sell(run3, p3[k], g[k])
 
-    vap_liq_exchange = _sel(run3, p3["vap_liq_exchange"],
+    vap_liq_exchange = sell(run3, p3["vap_liq_exchange"],
                             diags["vap_liq_exchange"])
 
     # diagnostics that keep their init values in skipped columns
-    diag_eff_radius_qc = _sel(run3, p3["diag_eff_radius_qc"],
+    diag_eff_radius_qc = sell(run3, p3["diag_eff_radius_qc"],
                               jnp.full_like(zcol, 10.0e-6))
-    diag_eff_radius_qi = _sel(run3, p3["diag_eff_radius_qi"],
+    diag_eff_radius_qi = sell(run3, p3["diag_eff_radius_qi"],
                               jnp.full_like(zcol, 25.0e-6))
-    diag_eff_radius_qr = _sel(run3, p3["diag_eff_radius_qr"],
+    diag_eff_radius_qr = sell(run3, p3["diag_eff_radius_qr"],
                               jnp.full_like(zcol, 500.0e-6))
-    diag_equiv_reflectivity = _sel(run3, p3["diag_equiv_reflectivity"],
+    diag_equiv_reflectivity = sell(run3, p3["diag_equiv_reflectivity"],
                                    jnp.full_like(zcol, -99.0))
-    rho_qi = _sel(run3, p3["rho_qi"], zcol)
-    diag_vm_qi = _sel(run3, p3["diag_vm_qi"], zcol)
-    diag_diam_qi = _sel(run3, p3["diag_diam_qi"], zcol)
+    rho_qi = sell(run3, p3["rho_qi"], zcol)
+    diag_vm_qi = sell(run3, p3["diag_vm_qi"], zcol)
+    diag_diam_qi = sell(run3, p3["diag_diam_qi"], zcol)
 
     # cloud sed SETS precip_liq_surf, rain sed ADDS to it; both ran with a
     # zero input so the C++ value is the sum of the two contributions
-    precip_liq_surf = jnp.where(
+    precip_liq_surf = selc(
         run3, csed["precip_liq_surf"] + rsed["precip_liq_surf"], 0.0)
-    precip_ice_surf = jnp.where(run3, ised["precip_ice_surf"], 0.0)
-    precip_liq_flux = _sel(run3, rsed["precip_liq_flux"],
+    precip_ice_surf = selc(run3, ised["precip_ice_surf"], 0.0)
+    precip_liq_flux = sell(run3, rsed["precip_liq_flux"],
                            jnp.zeros(zcol.shape[:-1] + (zcol.shape[-1] + 1,)))
     precip_ice_flux = jnp.zeros_like(precip_liq_flux)
 
@@ -228,9 +252,9 @@ def p3_main(dt,
         "rho_qi": rho_qi,
         "diag_vm_qi": diag_vm_qi,
         "diag_diam_qi": diag_diam_qi,
-        "qc_sed_tend": jnp.where(run3[..., None], csed["qc_tend"], 0.0),
-        "qr_sed_tend": jnp.where(run3[..., None], rsed["qr_tend"], 0.0),
-        "qi_sed_tend": jnp.where(run3[..., None], ised["qi_tend"], 0.0),
+        "qc_sed_tend": sell(run3, csed["qc_tend"], 0.0 * zcol),
+        "qr_sed_tend": sell(run3, rsed["qr_tend"], 0.0 * zcol),
+        "qi_sed_tend": sell(run3, ised["qi_tend"], 0.0 * zcol),
         # per-column guard against silent CFL-substep truncation in the
         # fixed-length sedimentation scans (see sedimentation.py)
         "sed_converged": (csed["converged"] & rsed["converged"]

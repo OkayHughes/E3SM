@@ -295,3 +295,19 @@ enter (CAAS projection via its scalar dual root per Blondel et al.
 w.r.t. cloud fraction through radiation are needed; suite-level
 checkpointing strategy for reverse mode through the 6-substep mac_mic
 loop.
+
+### B1 uniform-substep sedimentation: implemented; hypothesis refuted
+`sed_mode` in {"while","scan","uniform"} (+ `p3_soft_masks`): the
+uniform mode removes ALL adaptive-controller discreteness (fixed
+dt/M substeps, full-column band, per-substep surface accumulation).
+Verified: default bitwise (suite 204), conservation/envelope/
+M-refinement tests in tests/test_p3_sed_uniform.py. Stage C
+measurement (p3_jump_gap.py --stage c): uniform == scan to 4 digits
+for ALL objectives and soft masks change nothing -- the precip
+boundary term does NOT live in the sedimentation controller or the
+column masks. Remaining candidates: part2's unsmoothed qv/T/ni-driven
+jumps (ssat gates, wet-growth qm:=qi snap, ni-gated epsi) and
+joint-flip interactions; note also precip's E2 truth is not
+FD-converged (strong eps-dependence), so its gap magnitude is itself
+uncertain. Recommendation: score-function/ES estimation for
+precip-like objectives; smoothing suffices for heat sign and warm.

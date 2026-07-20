@@ -7,21 +7,43 @@ Sources (components/eamxx/src/physics/p3/impl/):
   (drivers + compute_rain_fall_velocity + homogeneous_freezing)
 
 EAMxx always calls these with kdir = -1 (k=0 at model top, kbot = nlev-1 at
-the surface); only that orientation is implemented. The C++ per-column
-while(dt_left > tol) CFL substepping has two bit-identical realizations
-selected by the static `use_while_loop` flag:
+the surface); only that orientation is implemented. Each kernel has THREE
+realizations selected by the static `sed_mode` kwarg ("while" | "scan" |
+"uniform"; the legacy static `use_while_loop` flag still works — True ->
+"while", False -> "scan" — and `sed_mode`, when given, wins):
 
-- use_while_loop=True (DEFAULT — the fast primal path for production
-  runs without autodiff): the direct lax.while_loop transcription.
-  NOT reverse-mode differentiable (jax.grad raises).
-- use_while_loop=False (SWITCH TO THIS FOR AUTODIFF, e.g. via
-  p3 opts["sed_use_while_loop"] = False): a fixed-length lax.scan over
+- "while" (DEFAULT — the fast primal path for production runs without
+  autodiff): the direct lax.while_loop transcription of the C++
+  per-column while(dt_left > tol) CFL substepping. NOT reverse-mode
+  differentiable (jax.grad raises).
+- "scan" (bit-identical autodiff path): a fixed-length lax.scan over
   batched columns; every step selects per column, with a pure jnp.where
   on each carry component, between the substep result and the incoming
   carry, so columns whose dt_left is already spent pass through bitwise
   unchanged and the result is bit-identical to the while_loop as long
   as the static bound MAX_SEDI_SUBSTEPS_* covers the actual trip count
   (~5.5x slower primal at the default 4x-margin bounds).
+- "uniform" (SMOOTH surrogate — deliberately NOT bit-identical): a
+  fixed-length lax.scan of M substeps (M = `max_substeps`, default
+  MAX_SEDI_SUBSTEPS_*) with CONSTANT dt_sub = dt/M. Each substep
+  recomputes the fall velocities / DSD exactly as one adaptive outer
+  iteration does (same code paths) but applies the unchanged
+  _upwind_substep over the FULL column: no k_qxtop/k_qxbot band
+  tracking, no k_temp band extension, no at_ground gating, and no
+  per-column early exit — this removes the adaptive controller's
+  discreteness (nstep = floor(Co_max+1) micro-jumps and the
+  surface-arrival band gating) from the computational graph. The
+  surface flux accumulates EVERY substep (prt_accum += flux_sfc *
+  dt_sub), so the precip outputs mean the same physical thing as the
+  hard modes (cloud SETS precip_liq_surf, ignoring its input — the
+  driver passes zero; rain/ice ACCUMULATE onto their input). Columns
+  with no condensate produce exactly-zero fluxes (the per-level
+  q > QSMALL velocity gate) without any hard column mask. Deviation
+  from the hard modes is O(dt_sub) time-discretization plus the band
+  bookkeeping, concentrated at CFL/band knife edges. Rain's
+  precip_liq_flux diagnostic accumulates flux * dt_sub/dt (the
+  TIME-MEAN flux, M-independent) instead of the C++'s unweighted,
+  iteration-count-dependent sum. "converged" is identically True.
 
 Each returned dict carries a per-column "converged" flag (dt_left <= tol
 at the end) guarding against silent truncation in scan mode. The
@@ -82,6 +104,30 @@ def _masked_substep_scan(body, carry, length):
                 n, o)
             for n, o in zip(new, carry))
         return merged, None
+
+    final, _ = lax.scan(jax.checkpoint(step), carry, None, length=length)
+    return final
+
+
+def _resolve_sed_mode(sed_mode, use_while_loop):
+    """Static (trace-time) mode resolution: `sed_mode` wins when given;
+    otherwise the legacy `use_while_loop` flag maps True -> "while",
+    False -> "scan"."""
+    if sed_mode is None:
+        return "while" if use_while_loop else "scan"
+    if sed_mode not in ("while", "scan", "uniform"):
+        raise ValueError(
+            f"sed_mode must be 'while', 'scan' or 'uniform', got {sed_mode!r}")
+    return sed_mode
+
+
+def _uniform_substep_scan(body, carry, length):
+    """Fixed-length lax.scan of `length` uniform substeps ("uniform"
+    mode). `body` maps carry -> carry with a constant dt_sub baked in;
+    each step is wrapped in jax.checkpoint so reverse-mode memory stays
+    linear in `length` with cheap recompute."""
+    def step(carry, _):
+        return body(carry), None
 
     final, _ = lax.scan(jax.checkpoint(step), carry, None, length=length)
     return final
@@ -164,18 +210,21 @@ def _generalized_substep(fields, velocities, rho, inv_rho, inv_dz, idx,
 
 
 @functools.partial(jax.jit, static_argnames=("do_predict_nc", "max_substeps",
-                                             "use_while_loop"))
+                                             "use_while_loop", "sed_mode"))
 def cloud_sedimentation(qc_incld, rho, inv_rho, cld_frac_l, acn, inv_dz,
                         dt, inv_dt, do_predict_nc: bool,
                         qc, nc, nc_incld, mu_c, lamc,
                         qc_tend_in, nc_tend_in, precip_liq_surf_in,
-                        max_substeps=None, use_while_loop=True):
+                        max_substeps=None, use_while_loop=True,
+                        sed_mode=None):
     """Functions::cloud_sedimentation. Returns a dict with qc, nc,
     qc_incld, nc_incld, mu_c, lamc, qc_tend, nc_tend, precip_liq_surf,
     converged (per-column: dt spent within the substep bound).
 
     precip_liq_surf is SET (not accumulated) where cloud water is present,
-    as in the C++."""
+    as in the C++ (in "uniform" mode it is set unconditionally and
+    precip_liq_surf_in is ignored — the driver passes zero)."""
+    mode = _resolve_sed_mode(sed_mode, use_while_loop)
     qc, nc = jnp.asarray(qc), jnp.asarray(nc)
     qc_incld, nc_incld = jnp.asarray(qc_incld), jnp.asarray(nc_incld)
     mu_c, lamc = jnp.asarray(mu_c), jnp.asarray(lamc)
@@ -191,16 +240,9 @@ def cloud_sedimentation(qc_incld, rho, inv_rho, cld_frac_l, acn, inv_dz,
     dt_left0 = jnp.where(present, dt, 0.0)
     prt0 = jnp.zeros_like(dt_left0)
 
-    def cond(carry):
-        return jnp.any(carry[-3] > c.dt_left_tol)
-
-    def body(carry):
-        qc, nc, qc_incld, nc_incld, mu_c, lamc, dt_left, prt_accum, k_qxbot = carry
-        active = dt_left > c.dt_left_tol
-        co_band = ((idx >= k_qxtop[..., None]) & (idx <= k_qxbot[..., None])
-                   & active[..., None])
-        m = co_band & (qc_incld > c.QSMALL)
-
+    def dsd_vel(qc, nc, qc_incld, nc_incld, mu_c, lamc, m):
+        """DSD limiting + fall velocities of one outer iteration, under
+        the context mask m (shared by all three modes)."""
         nc2, mu2, _, lam2, _, _ = get_cloud_dsd2(qc_incld, nc_incld, rho, m)
         nc_incld = jnp.where(m, nc2, nc_incld)
         mu_c = jnp.where(m, mu2, mu_c)
@@ -217,6 +259,20 @@ def cloud_sedimentation(qc_incld, rho, inv_rho, cld_frac_l, acn, inv_dz,
             fields, velocities = (qc, nc), (V_qc, V_nc)
         else:
             fields, velocities = (qc,), (V_qc,)
+        return nc, nc_incld, mu_c, lamc, fields, velocities, V_qc
+
+    def cond(carry):
+        return jnp.any(carry[-3] > c.dt_left_tol)
+
+    def body(carry):
+        qc, nc, qc_incld, nc_incld, mu_c, lamc, dt_left, prt_accum, k_qxbot = carry
+        active = dt_left > c.dt_left_tol
+        co_band = ((idx >= k_qxtop[..., None]) & (idx <= k_qxbot[..., None])
+                   & active[..., None])
+        m = co_band & (qc_incld > c.QSMALL)
+
+        nc, nc_incld, mu_c, lamc, fields, velocities, V_qc = dsd_vel(
+            qc, nc, qc_incld, nc_incld, mu_c, lamc, m)
 
         Co_max = jnp.max(
             jnp.where(m, V_qc * dt_left[..., None] * inv_dz, 0.0), axis=-1)
@@ -233,26 +289,52 @@ def cloud_sedimentation(qc_incld, rho, inv_rho, cld_frac_l, acn, inv_dz,
         nc_incld = jnp.where(act, nc / cld_frac_l, nc_incld)
         return qc, nc, qc_incld, nc_incld, mu_c, lamc, dt_left, prt_accum, k_qxbot
 
-    carry = (qc, nc, qc_incld, nc_incld, mu_c, lamc,
-             dt_left0, prt0, k_qxbot0)
-    if use_while_loop:
-        final = lax.while_loop(cond, body, carry)
-    else:
+    if mode == "uniform":
         n = MAX_SEDI_SUBSTEPS_CLOUD if max_substeps is None else max_substeps
-        final = _masked_substep_scan(body, carry, n)
-    (qc, nc, qc_incld, nc_incld, mu_c, lamc,
-     dt_left, prt_accum, _) = final
+        dt_sub = jnp.asarray(dt) / n
 
-    precip_liq_surf = jnp.where(
-        present, prt_accum * c.INV_RHO_H2O * inv_dt,
-        jnp.asarray(precip_liq_surf_in))
+        def ubody(carry):
+            qc, nc, qc_incld, nc_incld, mu_c, lamc, prt_accum = carry
+            m = qc_incld > c.QSMALL
+            nc, nc_incld, mu_c, lamc, fields, velocities, _ = dsd_vel(
+                qc, nc, qc_incld, nc_incld, mu_c, lamc, m)
+            fields, fluxes = _upwind_substep(
+                fields, velocities, rho, inv_rho, inv_dz, dt_sub, True)
+            qc = fields[0]
+            if do_predict_nc:
+                nc = fields[1]
+            prt_accum = prt_accum + fluxes[0][..., -1] * dt_sub
+            qc_incld = qc / cld_frac_l
+            nc_incld = nc / cld_frac_l
+            return qc, nc, qc_incld, nc_incld, mu_c, lamc, prt_accum
+
+        (qc, nc, qc_incld, nc_incld, mu_c, lamc, prt_accum) = \
+            _uniform_substep_scan(
+                ubody, (qc, nc, qc_incld, nc_incld, mu_c, lamc, prt0), n)
+        precip_liq_surf = prt_accum * c.INV_RHO_H2O * inv_dt
+        converged = jnp.ones_like(present)
+    else:
+        carry = (qc, nc, qc_incld, nc_incld, mu_c, lamc,
+                 dt_left0, prt0, k_qxbot0)
+        if mode == "while":
+            final = lax.while_loop(cond, body, carry)
+        else:
+            n = MAX_SEDI_SUBSTEPS_CLOUD if max_substeps is None else max_substeps
+            final = _masked_substep_scan(body, carry, n)
+        (qc, nc, qc_incld, nc_incld, mu_c, lamc,
+         dt_left, prt_accum, _) = final
+
+        precip_liq_surf = jnp.where(
+            present, prt_accum * c.INV_RHO_H2O * inv_dt,
+            jnp.asarray(precip_liq_surf_in))
+        converged = dt_left <= c.dt_left_tol
     return {
         "qc": qc, "nc": nc, "qc_incld": qc_incld, "nc_incld": nc_incld,
         "mu_c": mu_c, "lamc": lamc,
         "qc_tend": (qc - jnp.asarray(qc_tend_in)) * inv_dt,
         "nc_tend": (nc - jnp.asarray(nc_tend_in)) * inv_dt,
         "precip_liq_surf": precip_liq_surf,
-        "converged": dt_left <= c.dt_left_tol,
+        "converged": converged,
     }
 
 
@@ -274,17 +356,23 @@ def compute_rain_fall_velocity(vn_table_vals, vm_table_vals, qr_incld,
 
 
 @functools.partial(jax.jit, static_argnames=("max_substeps",
-                                             "use_while_loop"))
+                                             "use_while_loop", "sed_mode"))
 def rain_sedimentation(rho, inv_rho, rhofacr, cld_frac_r, inv_dz, qr_incld,
                        vn_table_vals, vm_table_vals, dt, inv_dt,
                        qr, nr, nr_incld, mu_r, lamr,
                        precip_liq_flux_in, qr_tend_in, nr_tend_in,
                        precip_liq_surf_in, opts,
-                       max_substeps=None, use_while_loop=True):
+                       max_substeps=None, use_while_loop=True,
+                       sed_mode=None):
     """Functions::rain_sedimentation. Returns a dict with qr, nr,
     qr_incld, nr_incld, mu_r, lamr, precip_liq_flux (nlev+1 interfaces),
     qr_tend, nr_tend, precip_liq_surf (accumulated: in + contribution),
-    converged (per-column: dt spent within the substep bound)."""
+    converged (per-column: dt spent within the substep bound).
+
+    In "uniform" mode precip_liq_flux accumulates the TIME-MEAN flux
+    (flux * dt_sub/dt per substep) instead of the C++'s unweighted,
+    iteration-count-dependent sum (see module docstring)."""
+    mode = _resolve_sed_mode(sed_mode, use_while_loop)
     qr, nr = jnp.asarray(qr), jnp.asarray(nr)
     qr_incld, nr_incld = jnp.asarray(qr_incld), jnp.asarray(nr_incld)
     mu_r, lamr = jnp.asarray(mu_r), jnp.asarray(lamr)
@@ -342,41 +430,81 @@ def rain_sedimentation(rho, inv_rho, rhofacr, cld_frac_r, inv_dz, qr_incld,
         return (qr, nr, qr_incld, nr_incld, mu_r, lamr, precip_liq_flux,
                 dt_left, prt_accum, k_qxbot)
 
-    carry = (qr, nr, qr_incld, nr_incld, mu_r, lamr, precip_liq_flux,
-             dt_left0, prt0, k_qxbot0)
-    if use_while_loop:
-        final = lax.while_loop(cond, body, carry)
-    else:
+    if mode == "uniform":
         n = MAX_SEDI_SUBSTEPS_RAIN if max_substeps is None else max_substeps
-        final = _masked_substep_scan(body, carry, n)
-    (qr, nr, qr_incld, nr_incld, mu_r, lamr, precip_liq_flux,
-     dt_left, prt_accum, _) = final
+        dt_sub = jnp.asarray(dt) / n
 
-    precip_liq_surf = (jnp.asarray(precip_liq_surf_in)
-                       + jnp.where(present,
-                                   prt_accum * c.INV_RHO_H2O * inv_dt, 0.0))
+        def ubody(carry):
+            (qr, nr, qr_incld, nr_incld, mu_r, lamr, precip_liq_flux,
+             prt_accum) = carry
+            m = qr_incld > c.QSMALL
+            nr_incld, mu_r, lamr, V_qr, V_nr = compute_rain_fall_velocity(
+                vn_table_vals, vm_table_vals, qr_incld, rhofacr,
+                nr_incld, mu_r, lamr, opts["constant_mu_rain"], m)
+            nr = jnp.where(m, nr_incld * cld_frac_r, nr)
+
+            (qr, nr), fluxes = _upwind_substep(
+                (qr, nr), (V_qr, V_nr), rho, inv_rho, inv_dz, dt_sub, True)
+            prt_accum = prt_accum + fluxes[0][..., -1] * dt_sub
+            qr_incld = qr / cld_frac_r
+            nr_incld = nr / cld_frac_r
+
+            # time-mean qr flux on interfaces (interface 0 sees zero
+            # incoming flux; interface k+1 sees the flux out of level k)
+            flux_qx = fluxes[0]
+            flux_shift = jnp.concatenate(
+                [jnp.zeros_like(flux_qx[..., :1]), flux_qx], axis=-1)
+            precip_liq_flux = precip_liq_flux + flux_shift * (dt_sub * inv_dt)
+            return (qr, nr, qr_incld, nr_incld, mu_r, lamr, precip_liq_flux,
+                    prt_accum)
+
+        (qr, nr, qr_incld, nr_incld, mu_r, lamr, precip_liq_flux,
+         prt_accum) = _uniform_substep_scan(
+            ubody, (qr, nr, qr_incld, nr_incld, mu_r, lamr, precip_liq_flux,
+                    prt0), n)
+        precip_liq_surf = (jnp.asarray(precip_liq_surf_in)
+                           + prt_accum * c.INV_RHO_H2O * inv_dt)
+        converged = jnp.ones_like(present)
+    else:
+        carry = (qr, nr, qr_incld, nr_incld, mu_r, lamr, precip_liq_flux,
+                 dt_left0, prt0, k_qxbot0)
+        if mode == "while":
+            final = lax.while_loop(cond, body, carry)
+        else:
+            n = MAX_SEDI_SUBSTEPS_RAIN if max_substeps is None else max_substeps
+            final = _masked_substep_scan(body, carry, n)
+        (qr, nr, qr_incld, nr_incld, mu_r, lamr, precip_liq_flux,
+         dt_left, prt_accum, _) = final
+
+        precip_liq_surf = (jnp.asarray(precip_liq_surf_in)
+                           + jnp.where(present,
+                                       prt_accum * c.INV_RHO_H2O * inv_dt,
+                                       0.0))
+        converged = dt_left <= c.dt_left_tol
     return {
         "qr": qr, "nr": nr, "qr_incld": qr_incld, "nr_incld": nr_incld,
         "mu_r": mu_r, "lamr": lamr, "precip_liq_flux": precip_liq_flux,
         "qr_tend": (qr - jnp.asarray(qr_tend_in)) * inv_dt,
         "nr_tend": (nr - jnp.asarray(nr_tend_in)) * inv_dt,
         "precip_liq_surf": precip_liq_surf,
-        "converged": dt_left <= c.dt_left_tol,
+        "converged": converged,
     }
 
 
 @functools.partial(jax.jit, static_argnames=("max_substeps",
-                                             "use_while_loop"))
+                                             "use_while_loop", "sed_mode"))
 def ice_sedimentation(rho, inv_rho, rhofaci, cld_frac_i, inv_dz,
                       dt, inv_dt,
                       qi, qi_incld, ni, ni_incld, qm, qm_incld,
                       bm, bm_incld, ice_table_vals,
                       qi_tend_in, ni_tend_in, precip_ice_surf_in, opts,
-                      max_substeps=None, use_while_loop=True):
+                      max_substeps=None, use_while_loop=True,
+                      sed_mode=None):
     """Functions::ice_sedimentation. Returns a dict with qi, ni, qm, bm,
     their in-cloud values, qi_tend, ni_tend, precip_ice_surf (accumulated),
     converged (per-column: dt spent within the substep bound).
     qm and bm advect with the mass-weighted velocity V_qit."""
+    mode = _resolve_sed_mode(sed_mode, use_while_loop)
     qi, ni = jnp.asarray(qi), jnp.asarray(ni)
     qm, bm = jnp.asarray(qm), jnp.asarray(bm)
     qi_incld, ni_incld = jnp.asarray(qi_incld), jnp.asarray(ni_incld)
@@ -393,17 +521,9 @@ def ice_sedimentation(rho, inv_rho, rhofaci, cld_frac_i, inv_dz,
     dt_left0 = jnp.where(present, dt, 0.0)
     prt0 = jnp.zeros_like(dt_left0)
 
-    def cond(carry):
-        return jnp.any(carry[-3] > c.dt_left_tol)
-
-    def body(carry):
-        (qi, ni, qm, bm, qi_incld, ni_incld, qm_incld, bm_incld,
-         dt_left, prt_accum, k_qxbot) = carry
-        active = dt_left > c.dt_left_tol
-        co_band = ((idx >= k_qxtop[..., None]) & (idx <= k_qxbot[..., None])
-                   & active[..., None])
-        m = co_band & (qi_incld > c.QSMALL)
-
+    def dsd_vel(ni, qm, bm, qi_incld, ni_incld, qm_incld, bm_incld, m):
+        """Rime-density limiting, table lookups and fall velocities of
+        one outer iteration, under the context mask m (all modes)."""
         ni_incld = jnp.where(m, jnp.maximum(ni_incld, c.NSMALL), ni_incld)
         rhop, qm2, bm2 = calc_bulk_rho_rime(qi_incld, qm_incld, bm_incld,
                                             opts, m)
@@ -426,6 +546,21 @@ def ice_sedimentation(rho, inv_rho, rhofaci, cld_frac_i, inv_dz,
         factor = opts["ice_sedimentation_factor"]
         V_qit = jnp.where(m, factor * t_qi_fallspd * rhofaci, 0.0)
         V_nit = jnp.where(m, factor * t_ni_fallspd * rhofaci, 0.0)
+        return ni, qm, bm, ni_incld, qm_incld, bm_incld, V_qit, V_nit
+
+    def cond(carry):
+        return jnp.any(carry[-3] > c.dt_left_tol)
+
+    def body(carry):
+        (qi, ni, qm, bm, qi_incld, ni_incld, qm_incld, bm_incld,
+         dt_left, prt_accum, k_qxbot) = carry
+        active = dt_left > c.dt_left_tol
+        co_band = ((idx >= k_qxtop[..., None]) & (idx <= k_qxbot[..., None])
+                   & active[..., None])
+        m = co_band & (qi_incld > c.QSMALL)
+
+        ni, qm, bm, ni_incld, qm_incld, bm_incld, V_qit, V_nit = dsd_vel(
+            ni, qm, bm, qi_incld, ni_incld, qm_incld, bm_incld, m)
 
         Co_max = jnp.max(
             jnp.where(m, V_qit * dt_left[..., None] * inv_dz, 0.0), axis=-1)
@@ -444,19 +579,51 @@ def ice_sedimentation(rho, inv_rho, rhofaci, cld_frac_i, inv_dz,
         return (qi, ni, qm, bm, qi_incld, ni_incld, qm_incld, bm_incld,
                 dt_left, prt_accum, k_qxbot)
 
-    carry = (qi, ni, qm, bm, qi_incld, ni_incld, qm_incld, bm_incld,
-             dt_left0, prt0, k_qxbot0)
-    if use_while_loop:
-        final = lax.while_loop(cond, body, carry)
-    else:
+    if mode == "uniform":
         n = MAX_SEDI_SUBSTEPS_ICE if max_substeps is None else max_substeps
-        final = _masked_substep_scan(body, carry, n)
-    (qi, ni, qm, bm, qi_incld, ni_incld, qm_incld, bm_incld,
-     dt_left, prt_accum, _) = final
+        dt_sub = jnp.asarray(dt) / n
 
-    precip_ice_surf = (jnp.asarray(precip_ice_surf_in)
-                       + jnp.where(present,
-                                   prt_accum * c.INV_RHO_H2O * inv_dt, 0.0))
+        def ubody(carry):
+            (qi, ni, qm, bm, qi_incld, ni_incld, qm_incld, bm_incld,
+             prt_accum) = carry
+            m = qi_incld > c.QSMALL
+            ni, qm, bm, ni_incld, qm_incld, bm_incld, V_qit, V_nit = dsd_vel(
+                ni, qm, bm, qi_incld, ni_incld, qm_incld, bm_incld, m)
+
+            (qi, ni, qm, bm), fluxes = _upwind_substep(
+                (qi, ni, qm, bm), (V_qit, V_nit, V_qit, V_qit),
+                rho, inv_rho, inv_dz, dt_sub, True)
+            prt_accum = prt_accum + fluxes[0][..., -1] * dt_sub
+            qi_incld = qi / cld_frac_i
+            ni_incld = ni / cld_frac_i
+            qm_incld = qm / cld_frac_i
+            bm_incld = bm / cld_frac_i
+            return (qi, ni, qm, bm, qi_incld, ni_incld, qm_incld, bm_incld,
+                    prt_accum)
+
+        (qi, ni, qm, bm, qi_incld, ni_incld, qm_incld, bm_incld,
+         prt_accum) = _uniform_substep_scan(
+            ubody, (qi, ni, qm, bm, qi_incld, ni_incld, qm_incld,
+                    bm_incld, prt0), n)
+        precip_ice_surf = (jnp.asarray(precip_ice_surf_in)
+                           + prt_accum * c.INV_RHO_H2O * inv_dt)
+        converged = jnp.ones_like(present)
+    else:
+        carry = (qi, ni, qm, bm, qi_incld, ni_incld, qm_incld, bm_incld,
+                 dt_left0, prt0, k_qxbot0)
+        if mode == "while":
+            final = lax.while_loop(cond, body, carry)
+        else:
+            n = MAX_SEDI_SUBSTEPS_ICE if max_substeps is None else max_substeps
+            final = _masked_substep_scan(body, carry, n)
+        (qi, ni, qm, bm, qi_incld, ni_incld, qm_incld, bm_incld,
+         dt_left, prt_accum, _) = final
+
+        precip_ice_surf = (jnp.asarray(precip_ice_surf_in)
+                           + jnp.where(present,
+                                       prt_accum * c.INV_RHO_H2O * inv_dt,
+                                       0.0))
+        converged = dt_left <= c.dt_left_tol
     return {
         "qi": qi, "ni": ni, "qm": qm, "bm": bm,
         "qi_incld": qi_incld, "ni_incld": ni_incld,
@@ -464,7 +631,7 @@ def ice_sedimentation(rho, inv_rho, rhofaci, cld_frac_i, inv_dz,
         "qi_tend": (qi - jnp.asarray(qi_tend_in)) * inv_dt,
         "ni_tend": (ni - jnp.asarray(ni_tend_in)) * inv_dt,
         "precip_ice_surf": precip_ice_surf,
-        "converged": dt_left <= c.dt_left_tol,
+        "converged": converged,
     }
 
 

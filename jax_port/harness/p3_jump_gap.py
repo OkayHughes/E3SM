@@ -30,9 +30,27 @@ for a width sweep, plus a family ablation (cumulative in the task's
 a->e order, and per-family singletons) at one representative width.
 Closure is reported against the Stage A E2 truth band.
 
+Stage C — design B1: smooth "uniform-substep" sedimentation
+(sed_mode="uniform": fixed-length scan of M equal substeps, no adaptive
+CFL controller / band bookkeeping — see p3/sedimentation.py) and the
+p3_soft_masks option (hard active/run3 column gates in p3_main
+disabled). Reports E3(w) / E3'(w) (same estimators as Stage B, smooth
+families ALL) for the configs
+
+  (scan, hard masks)      — Stage B baseline realization
+  (uniform, hard masks)   — controller discreteness removed
+  (uniform, soft masks)   — + column-gate discreteness removed
+  (scan, soft masks)      — isolates the column-gate contribution
+
+at widths including w=0 (no family smoothing: isolates the pure
+sed-mode/mask effect). Closure is reported against the SAME Stage A E2
+truth band — the truth stays defined by the HARD primal.
+
 Run: cd jax_port && .venv/bin/python harness/p3_jump_gap.py
 (~2 min Stage A + ~10 min Stage B; each (width, families) config
 recompiles the jacrev once — widths are static.)
+--stage c runs Stage A + Stage C (~15 min); --a-cache FILE.npz
+saves/reuses the Stage A per-sample arrays across invocations.
 """
 import argparse
 import json
@@ -82,7 +100,8 @@ XIS = rng.normal(size=(N,) + qc0.shape)  # common random numbers
 DIR = qc0 * v                            # perturbation direction in qc
 
 
-def run(qc, sed_while, smooth_width=0.0, smooth_families=None):
+def run(qc, sed_while, smooth_width=0.0, smooth_families=None,
+        sed_mode=None, soft_masks=False):
     out = p3_process_step(
         DT, True, True, True, False, False, False, False, False,
         jnp.asarray(s["T_mid"]), jnp.asarray(s["p_mid"]),
@@ -100,7 +119,8 @@ def run(qc, sed_while, smooth_width=0.0, smooth_families=None):
         jnp.asarray(s["precip_liq_surf_mass"]),
         jnp.asarray(s["precip_ice_surf_mass"]),
         tbl, opts, sed_use_while_loop=sed_while,
-        smooth_width=smooth_width, smooth_families=smooth_families)
+        smooth_width=smooth_width, smooth_families=smooth_families,
+        sed_mode=sed_mode, p3_soft_masks=soft_masks)
     return {
         "warm": jnp.sum(out["qc"] + out["qr"]),
         "heat": jnp.sum(out["T_mid"]),
@@ -206,7 +226,12 @@ def make_grad3(width, fams):
 
 def smoothed_dots(width, fams, n_ens, t0, tag):
     """Returns (E3 dict, E3' mean dict, E3' se dict) for one config."""
-    g3 = make_grad3(width, fams)
+    return _dots(make_grad3(width, fams), n_ens, t0, tag)
+
+
+def _dots(g3, n_ens, t0, tag):
+    """E3 (grad at qc0) and E3' (N-member CRN ensemble mean/se) for one
+    jacrev'd config."""
     tic = time.time()
     g0 = np.asarray(g3(jnp.asarray(qc0)))          # compiles here
     e3 = {name: float(np.vdot(g0[j], DIR)) for j, name in enumerate(OBJS)}
@@ -285,16 +310,97 @@ def stage_b(E1, E2, t0):
     return results
 
 
+# --------------------------------------------------------------------------
+# Stage C (design B1: uniform-substep sedimentation + soft column masks)
+# --------------------------------------------------------------------------
+C_WIDTHS = (0.0, 0.05, 0.1, 0.2)   # 0.0 = no family smoothing
+C_CONFIGS = (("scan", False), ("uniform", False),
+             ("uniform", True), ("scan", True))
+
+
+def cfg_label(mode, soft):
+    return mode + ("+soft" if soft else "")
+
+
+def make_grad3_c(mode, soft, width):
+    def f(qc):
+        r = run(qc, False, width, None, sed_mode=mode, soft_masks=soft)
+        return jnp.stack([r[name] for name in OBJS])
+    return jax.jit(jax.jacrev(f))
+
+
+def stage_c(E1, E2, t0):
+    e1m = {name: E1[name].mean() for name in OBJS}
+    e2m = {name: [E2[name][eps].mean() for eps in EPS_LIST] for name in OBJS}
+    e2lo = {name: min(e2m[name]) for name in OBJS}
+    e2hi = {name: max(e2m[name]) for name in OBJS}
+
+    print(f"\n=== Stage C: uniform-substep sedimentation / soft masks "
+          f"(N_B={N_B}, widths {C_WIDTHS}, smooth families ALL) ===")
+    print("(E2 truth band unchanged: defined by the HARD primal, Stage A)")
+    results = {}
+    for mode, soft in C_CONFIGS:
+        for w in C_WIDTHS:
+            tag = f"{cfg_label(mode, soft):13s} w={w}"
+            g3 = make_grad3_c(mode, soft, w)
+            results[(mode, soft, w)] = _dots(g3, N_B, t0, tag)
+
+    print("\n================ Stage C closure tables ================")
+    print("(closure %% = (E3' - E1) / (mid(E2 band) - E1); E1/E2 from "
+          "Stage A, N=%d)" % N)
+    for name in OBJS:
+        mid = 0.5 * (e2lo[name] + e2hi[name])
+        gap = mid - e1m[name]
+        print(f"\n  objective '{name}':  E1={e1m[name]:+.4e}   "
+              f"E2 band [{e2lo[name]:+.4e}, {e2hi[name]:+.4e}]   "
+              f"gap={gap:+.3e}")
+        print(f"    {'config':22s} {'E3 (no noise)':>14s} "
+              f"{'E3p (N=16)':>14s} {'+/-':>8s} {'closure%':>9s} "
+              f"{'sign(E2)':>8s}")
+        for (mode, soft, w), (e3, e3p, se) in results.items():
+            clos = 100.0 * (e3p[name] - e1m[name]) / gap if gap != 0 else 0.0
+            samesign = "yes" if np.sign(e3p[name]) == np.sign(mid) else "NO"
+            print(f"    {cfg_label(mode, soft):13s} w={w:<5g} "
+                  f"{e3[name]:>+14.4e} {e3p[name]:>+14.4e} "
+                  f"{se[name]:>8.1e} {clos:>8.1f}% {samesign:>8s}")
+    return results
+
+
+def stage_a_cached(t0, cache):
+    """Stage A with optional npz caching of the per-sample arrays."""
+    if cache and Path(cache).exists():
+        z = np.load(cache)
+        E1 = {name: z[f"E1_{name}"] for name in OBJS}
+        E2 = {name: {eps: z[f"E2_{name}_{eps}"] for eps in EPS_LIST}
+              for name in OBJS}
+        print(f"Stage A per-sample arrays loaded from {cache}")
+        return E1, E2
+    E1, E2 = stage_a(t0)
+    if cache:
+        np.savez(cache,
+                 **{f"E1_{n}": E1[n] for n in OBJS},
+                 **{f"E2_{n}_{eps}": E2[n][eps]
+                    for n in OBJS for eps in EPS_LIST})
+        print(f"Stage A per-sample arrays cached to {cache}")
+    return E1, E2
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--stage", choices=("a", "all"), default="all",
-                    help="'a' reproduces Stage A only; 'all' adds Stage B")
+    ap.add_argument("--stage", choices=("a", "all", "c"), default="all",
+                    help="'a' reproduces Stage A only; 'all' adds Stage B; "
+                         "'c' runs Stage A + Stage C (uniform sed / soft "
+                         "masks)")
+    ap.add_argument("--a-cache", default=None, metavar="FILE.npz",
+                    help="save/reuse the Stage A per-sample arrays")
     args = ap.parse_args()
 
     t0 = time.time()
-    E1, E2 = stage_a(t0)
+    E1, E2 = stage_a_cached(t0, args.a_cache)
     if args.stage == "all":
         stage_b(E1, E2, t0)
+    elif args.stage == "c":
+        stage_c(E1, E2, t0)
     print(f"\ntotal {time.time()-t0:.0f}s")
 
 

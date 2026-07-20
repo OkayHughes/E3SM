@@ -42,7 +42,13 @@ def family_width(smooth_width, smooth_families, family):
 # sed_use_while_loop (default True = fast lax.while_loop primal, NOT
 # reverse-mode differentiable). Pass sed_use_while_loop=False for
 # autodiff (bounded masked lax.scan, bit-identical primal, ~5.5x
-# slower; see p3/sedimentation.py docstring).
+# slower; see p3/sedimentation.py docstring). The newer static kwarg
+# sed_mode ("while" | "scan" | "uniform") supersedes it when given:
+# "uniform" is a SMOOTH fixed-substep sedimentation surrogate (not
+# bit-identical) that removes the adaptive CFL controller's
+# discreteness. Static kwarg p3_soft_masks=True additionally disables
+# the hard active/run3 column gates in p3_main (compute everywhere,
+# O(qsmall) contributions from inactive columns).
 DEFAULT_OPTS = {
     "max_total_ni": 740.0e3,
     "autoconversion_prefactor": 1350.0,
