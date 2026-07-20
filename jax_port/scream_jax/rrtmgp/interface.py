@@ -242,9 +242,15 @@ def rrtmgp_main(kd_sw, kd_lw, co_sw, co_lw,
                 lwp, iwp, rel, rei, cldfrac,
                 aer_tau_sw, aer_ssa_sw, aer_g_sw, aer_tau_lw,
                 tsi_scaling,
-                extra_clnclrsky_diag=False, extra_clnsky_diag=False):
+                extra_clnclrsky_diag=False, extra_clnsky_diag=False,
+                smooth_width=0.0):
     """eamxx rrtmgp_main. lwp/iwp in g/m2; aerosol arrays
-    (ncol, nlay, nband). Returns (sw dict, lw dict, cld_tau dicts)."""
+    (ncol, nlay, nband). Returns (sw dict, lw dict, cld_tau dicts).
+
+    smooth_width (STATIC Python float): 0.0 -> exact binary MCICA
+    subcolumn masks (bitwise original); > 0 -> smoothed fractional
+    masks (see mcica.get_subcolumn_mask) for differentiability in
+    cldfrac."""
     aerosol_sw = {"tau": jnp.asarray(aer_tau_sw),
                   "ssa": jnp.asarray(aer_ssa_sw),
                   "g": jnp.asarray(aer_g_sw)}
@@ -257,10 +263,10 @@ def rrtmgp_main(kd_sw, kd_lw, co_sw, co_lw,
 
     clouds_sw_gpt = mcica.get_subsampled_clouds(
         clouds_sw_bnd, cldfrac, play, kd_sw["gpt2band"], kd_sw["ngpt"],
-        two_stream=True)
+        two_stream=True, smooth_width=smooth_width)
     clouds_lw_gpt = mcica.get_subsampled_clouds(
         clouds_lw_bnd, cldfrac, play, kd_lw["gpt2band"], kd_lw["ngpt"],
-        two_stream=False)
+        two_stream=False, smooth_width=smooth_width)
 
     sw = rrtmgp_sw(kd_sw, play, plev, tlay, vmr, sfc_alb_dir, sfc_alb_dif,
                    mu0, aerosol_sw, clouds_sw_gpt, tsi_scaling,

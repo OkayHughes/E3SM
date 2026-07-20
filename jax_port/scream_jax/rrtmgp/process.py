@@ -119,11 +119,17 @@ def rrtmgp_process_step(kd_sw, kd_lw, co_sw, co_lw, params,
                         eff_radius_qc, eff_radius_qi, surf_lw_flux_up,
                         o3_volume_mix_ratio, rad_heating_pdel,
                         aero_tau_sw=None, aero_ssa_sw=None, aero_g_sw=None,
-                        aero_tau_lw=None):
+                        aero_tau_lw=None, smooth_width=0.0):
     """One radiation process step. Returns a dict of updated/computed
     EAMxx fields keyed by their EAMxx names. Aerosol arrays are
     (ncol, nband, nlay) as in the FM; None means no aerosol radiative
-    effects (zeros)."""
+    effects (zeros).
+
+    smooth_width (STATIC Python float, never a traced value): 0.0 ->
+    exact binary MCICA subcolumn masks (bitwise original); > 0 ->
+    approximation-by-identity fractional masks so that
+    d(fluxes)/d(cldfrac_tot) is nonzero and finite under AD (see
+    mcica.get_subcolumn_mask)."""
     T_mid = jnp.asarray(T_mid, dtype=jnp.float64)
     p_mid = jnp.asarray(p_mid)
     pdel = jnp.asarray(pseudo_density)
@@ -197,7 +203,8 @@ def rrtmgp_process_step(kd_sw, kd_lw, co_sw, co_lw, params,
         p_mid, T_mid, p_int, t_int, vmr,
         alb_dir, alb_dif, mu0, lwp, iwp, eff_radius_qc, eff_radius_qi,
         cldfrac_rad, a_tau_sw, a_ssa_sw, a_g_sw, a_tau_lw, eccf,
-        params["extra_clnclrsky_diag"], params["extra_clnsky_diag"])
+        params["extra_clnclrsky_diag"], params["extra_clnsky_diag"],
+        smooth_width=smooth_width)
 
     for key, grp, name in (
             ("SW_flux_up", "allsky", "flux_up"),
