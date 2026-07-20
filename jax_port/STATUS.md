@@ -311,3 +311,14 @@ joint-flip interactions; note also precip's E2 truth is not
 FD-converged (strong eps-dependence), so its gap magnitude is itself
 uncertain. Recommendation: score-function/ES estimation for
 precip-like objectives; smoothing suffices for heat sign and warm.
+
+### Priorities (2026-07-20): ML-relevant barriers first
+1. Differentiable radiation via smooth-MCICA (approximation-by-identity
+   on the subcolumn masks) — training-path blocker if losses see fluxes.
+2. Rollout reverse-mode: checkpointing strategy + memory/time profile
+   through the full suite step and multi-step rollouts; measure
+   gradient-norm growth vs horizon (first handle on the chaos limit).
+DEFERRED: ES/score-function estimators — revisit for future adjoint
+sensitivity tests (unbiased low-dim reference against which adjoint/
+surrogate gradients will be validated); design notes in the session
+history (antithetic + smoothed-model control variate).
