@@ -7,43 +7,92 @@ calc_bulk_rho_rime (p3_calc_bulk_rho_rime in p3_functions.hpp impl).
 import jax.numpy as jnp
 
 from ..foundation import constants as c
+from ..foundation import smoothing
 from .dsd import get_cloud_dsd2, get_rain_dsd2
 from .conservation import impose_max_total_ni
 from .table_lookups import apply_table_ice, lookup_ice
 
 
-def calc_bulk_rho_rime(qi_tot, qi_rim, bi_rim, opts, context):
+def calc_bulk_rho_rime(qi_tot, qi_rim, bi_rim, opts, context,
+                       smooth_width=0.0):
     """Bulk rime density with limiters (Functions::calc_bulk_rho_rime).
     Returns (rho_rime, qi_rim, bi_rim)."""
     qi_tot = jnp.asarray(qi_tot)
     qi_rim = jnp.asarray(qi_rim)
     bi_rim = jnp.asarray(bi_rim)
 
-    gt = (bi_rim >= c.BSMALL) & context
-    lt = (bi_rim < c.BSMALL) & context
+    if smooth_width == 0.0:
+        gt = (bi_rim >= c.BSMALL) & context
+        lt = (bi_rim < c.BSMALL) & context
 
-    bi_safe = jnp.where(gt, bi_rim, 1.0)
-    rho_rime = jnp.where(gt, qi_rim / bi_safe, 0.0)
+        bi_safe = jnp.where(gt, bi_rim, 1.0)
+        rho_rime = jnp.where(gt, qi_rim / bi_safe, 0.0)
 
-    lo = rho_rime < opts["min_rime_rho"]
-    hi = rho_rime > opts["max_rime_rho"]
-    rho_rime = jnp.where(gt & lo, opts["min_rime_rho"], rho_rime)
-    rho_rime = jnp.where(gt & hi, opts["max_rime_rho"], rho_rime)
-    adjust = gt & (lo | hi)
-    rho_safe = jnp.where(rho_rime > 0, rho_rime, 1.0)
-    bi_rim = jnp.where(adjust, qi_rim / rho_safe, bi_rim)
+        lo = rho_rime < opts["min_rime_rho"]
+        hi = rho_rime > opts["max_rime_rho"]
+        rho_rime = jnp.where(gt & lo, opts["min_rime_rho"], rho_rime)
+        rho_rime = jnp.where(gt & hi, opts["max_rime_rho"], rho_rime)
+        adjust = gt & (lo | hi)
+        rho_safe = jnp.where(rho_rime > 0, rho_rime, 1.0)
+        bi_rim = jnp.where(adjust, qi_rim / rho_safe, bi_rim)
 
-    qi_rim = jnp.where(lt, 0.0, qi_rim)
-    bi_rim = jnp.where(lt, 0.0, bi_rim)
-    rho_rime = jnp.where(lt, 0.0, rho_rime)
+        qi_rim = jnp.where(lt, 0.0, qi_rim)
+        bi_rim = jnp.where(lt, 0.0, bi_rim)
+        rho_rime = jnp.where(lt, 0.0, rho_rime)
 
-    over = (qi_rim > qi_tot) & (rho_rime > 0) & context
-    qi_rim = jnp.where(over, qi_tot, qi_rim)
-    bi_rim = jnp.where(over, qi_rim / rho_safe, bi_rim)
+        over = (qi_rim > qi_tot) & (rho_rime > 0) & context
+        qi_rim = jnp.where(over, qi_tot, qi_rim)
+        bi_rim = jnp.where(over, qi_rim / rho_safe, bi_rim)
 
-    tiny = (qi_rim < c.QSMALL) & context
-    qi_rim = jnp.where(tiny, 0.0, qi_rim)
-    bi_rim = jnp.where(tiny, 0.0, bi_rim)
+        tiny = (qi_rim < c.QSMALL) & context
+        qi_rim = jnp.where(tiny, 0.0, qi_rim)
+        bi_rim = jnp.where(tiny, 0.0, bi_rim)
+        return rho_rime, qi_rim, bi_rim
+
+    # PORT_NOTES (smoothing, family "rime"): JUMP — s = bi_rim - BSMALL,
+    # scale = BSMALL (1e-15). Where bi_rim falls below BSMALL the C++
+    # snaps qi_rim (finite, NOT -> 0 at the threshold) and bi_rim to
+    # zero; the on/off branches are blended with h = step(s). KINKS
+    # left hard: the min/max rho clamps (bi_rim = qi_rim/rho at the
+    # clamp boundary equals the unadjusted bi_rim -> continuous), the
+    # `over` cap (qi_rim = qi_tot continuous at the crossing) and the
+    # final qi_rim < QSMALL snap (jump size QSMALL, negligible).
+    h = jnp.where(context,
+                  smoothing.step(bi_rim - c.BSMALL, smooth_width,
+                                 scale=c.BSMALL),
+                  0.0)
+    # NaN-safety: floor the denominator so 1/bi^2 in the VJP cannot
+    # overflow to inf (0*inf = NaN through the blend). For
+    # bi_rim < 1e-100 the blend weight h is exactly 0 (sigmoid argument
+    # << -745), so outputs are unchanged.
+    bi_safe = jnp.where(bi_rim > 0, jnp.maximum(bi_rim, 1.0e-100), 1.0)
+    rho_on = qi_rim / bi_safe
+
+    lo = rho_on < opts["min_rime_rho"]
+    hi = rho_on > opts["max_rime_rho"]
+    rho_on = jnp.where(lo, opts["min_rime_rho"], rho_on)
+    rho_on = jnp.where(hi, opts["max_rime_rho"], rho_on)
+    rho_safe = jnp.where(rho_on > 0, rho_on, 1.0)
+    bi_on = jnp.where(lo | hi, qi_rim / rho_safe, bi_rim)
+
+    # blend the >=BSMALL branch (qi_rim, bi_on, rho_on) with the snap
+    # branch (0, 0, 0); leave non-context entries untouched
+    qi_b = h * qi_rim
+    bi_b = h * bi_on
+    rho_b = h * rho_on
+
+    rho_bsafe = jnp.where(rho_b > 0, rho_b, 1.0)
+    over = (qi_b > qi_tot) & (rho_b > 0) & context
+    qi_b = jnp.where(over, qi_tot, qi_b)
+    bi_b = jnp.where(over, qi_b / rho_bsafe, bi_b)
+
+    tiny = (qi_b < c.QSMALL) & context
+    qi_b = jnp.where(tiny, 0.0, qi_b)
+    bi_b = jnp.where(tiny, 0.0, bi_b)
+
+    qi_rim = jnp.where(context, qi_b, qi_rim)
+    bi_rim = jnp.where(context, bi_b, bi_rim)
+    rho_rime = jnp.where(context, rho_b, 0.0)
     return rho_rime, qi_rim, bi_rim
 
 

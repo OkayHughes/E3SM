@@ -41,6 +41,7 @@ import jax.numpy as jnp
 from jax import lax
 
 from ..foundation import constants as c
+from ..foundation import smoothing
 from .dsd import get_cloud_dsd2, get_rain_dsd2, _tgamma
 from .table_lookups import lookup_table3, apply_table3, lookup_ice, apply_table_ice
 from .main_part3 import calc_bulk_rho_rime
@@ -467,9 +468,9 @@ def ice_sedimentation(rho, inv_rho, rhofaci, cld_frac_i, inv_dz,
     }
 
 
-@jax.jit
+@functools.partial(jax.jit, static_argnames=("smooth_width",))
 def homogeneous_freezing(T_atm, inv_exner, qc, nc, qr, nr, qi, ni, qm, bm,
-                         th_atm):
+                         th_atm, smooth_width=0.0):
     """Instantaneous freezing of all cloud water and rain below T_homogfrz
     (Functions::homogeneous_freezing). Returns a dict with the updated
     qc, nc, qr, nr, qi, ni, qm, bm, th_atm."""
@@ -479,33 +480,57 @@ def homogeneous_freezing(T_atm, inv_exner, qc, nc, qr, nr, qi, ni, qm, bm,
     qi, ni, qm, bm = (jnp.asarray(a) for a in (qi, ni, qm, bm))
     th_atm = jnp.asarray(th_atm)
 
-    t_lt = T_atm < c.T_homogfrz
-    qc_ge = t_lt & (qc >= c.QSMALL)
-    qr_ge = t_lt & (qr >= c.QSMALL)
-
     Qc_nuc, Qr_nuc = qc, qr
     Nc_nuc = jnp.maximum(nc, c.NSMALL)
     Nr_nuc = jnp.maximum(nr, c.NSMALL)
 
-    qm = jnp.where(qc_ge, qm + Qc_nuc, qm)
-    qi = jnp.where(qc_ge, qi + Qc_nuc, qi)
-    bm = jnp.where(qc_ge, bm + Qc_nuc * c.INV_RHO_RIMEMAX, bm)
-    ni = jnp.where(qc_ge, ni + Nc_nuc, ni)
-    th_atm = jnp.where(qc_ge,
-                       th_atm + inv_exner * Qc_nuc * c.LatIce * c.INV_CP,
-                       th_atm)
+    if smooth_width == 0.0:
+        t_lt = T_atm < c.T_homogfrz
+        qc_ge = t_lt & (qc >= c.QSMALL)
+        qr_ge = t_lt & (qr >= c.QSMALL)
 
-    qm = jnp.where(qr_ge, qm + Qr_nuc, qm)
-    qi = jnp.where(qr_ge, qi + Qr_nuc, qi)
-    bm = jnp.where(qr_ge, bm + Qr_nuc * c.INV_RHO_RIMEMAX, bm)
-    ni = jnp.where(qr_ge, ni + Nr_nuc, ni)
-    th_atm = jnp.where(qr_ge,
-                       th_atm + inv_exner * Qr_nuc * c.LatIce * c.INV_CP,
-                       th_atm)
+        qm = jnp.where(qc_ge, qm + Qc_nuc, qm)
+        qi = jnp.where(qc_ge, qi + Qc_nuc, qi)
+        bm = jnp.where(qc_ge, bm + Qc_nuc * c.INV_RHO_RIMEMAX, bm)
+        ni = jnp.where(qc_ge, ni + Nc_nuc, ni)
+        th_atm = jnp.where(qc_ge,
+                           th_atm + inv_exner * Qc_nuc * c.LatIce * c.INV_CP,
+                           th_atm)
 
-    qc = jnp.where(qc_ge, 0.0, qc)
-    nc = jnp.where(qc_ge, 0.0, nc)
-    qr = jnp.where(qr_ge, 0.0, qr)
-    nr = jnp.where(qr_ge, 0.0, nr)
+        qm = jnp.where(qr_ge, qm + Qr_nuc, qm)
+        qi = jnp.where(qr_ge, qi + Qr_nuc, qi)
+        bm = jnp.where(qr_ge, bm + Qr_nuc * c.INV_RHO_RIMEMAX, bm)
+        ni = jnp.where(qr_ge, ni + Nr_nuc, ni)
+        th_atm = jnp.where(qr_ge,
+                           th_atm + inv_exner * Qr_nuc * c.LatIce * c.INV_CP,
+                           th_atm)
+
+        qc = jnp.where(qc_ge, 0.0, qc)
+        nc = jnp.where(qc_ge, 0.0, nc)
+        qr = jnp.where(qr_ge, 0.0, qr)
+        nr = jnp.where(qr_ge, 0.0, nr)
+    else:
+        # PORT_NOTES (smoothing, family "homog"): JUMP — s = T_homogfrz -
+        # T_atm, scale = 1 K. At T = T_homogfrz the ENTIRE cloud-water
+        # and rain categories (finite Qc_nuc = qc, Qr_nuc = qr) convert
+        # to ice with latent heat LatIce*q/cp: value-discontinuous in T.
+        # The smoothed form freezes the fraction hT of each category.
+        # The qc/qr >= QSMALL sub-gates stay hard (jump size QSMALL,
+        # effective kinks).
+        hT = smoothing.step(c.T_homogfrz - T_atm, smooth_width, scale=1.0)
+        fc = jnp.where(qc >= c.QSMALL, hT, 0.0)
+        fr = jnp.where(qr >= c.QSMALL, hT, 0.0)
+
+        qm = qm + fc * Qc_nuc + fr * Qr_nuc
+        qi = qi + fc * Qc_nuc + fr * Qr_nuc
+        bm = bm + (fc * Qc_nuc + fr * Qr_nuc) * c.INV_RHO_RIMEMAX
+        ni = ni + fc * Nc_nuc + fr * Nr_nuc
+        th_atm = th_atm + inv_exner * (fc * Qc_nuc + fr * Qr_nuc) \
+            * c.LatIce * c.INV_CP
+
+        qc = (1.0 - fc) * qc
+        nc = (1.0 - fc) * nc
+        qr = (1.0 - fr) * qr
+        nr = (1.0 - fr) * nr
     return {"qc": qc, "nc": nc, "qr": qr, "nr": nr,
             "qi": qi, "ni": ni, "qm": qm, "bm": bm, "th_atm": th_atm}

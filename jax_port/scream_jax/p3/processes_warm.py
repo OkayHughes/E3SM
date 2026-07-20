@@ -18,6 +18,7 @@ import jax.numpy as jnp
 from jax.scipy.special import gammaln
 
 from ..foundation import constants as c
+from ..foundation import smoothing
 
 
 def _tgamma(x):
@@ -105,7 +106,8 @@ def rain_self_collection(rho, qr_incld, nr_incld, opts, context):
 
 
 def ice_nucleation(temp, inv_rho, ni, ni_activated, qv_supersat_i, inv_dt,
-                   do_predict_nc: bool, do_prescribed_ccn: bool, opts, context):
+                   do_predict_nc: bool, do_prescribed_ccn: bool, opts, context,
+                   smooth_width=0.0):
     """Deposition/condensation-freezing ice nucleation
     (Functions::ice_nucleation). Returns (qv2qi_nucleat_tend, ni_nucleat_tend)."""
     temp = jnp.asarray(temp)
@@ -118,6 +120,34 @@ def ice_nucleation(temp, inv_rho, ni, ni_activated, qv_supersat_i, inv_dt,
     # do_log being TRUE (Cooper-type formula); `any_if_log` is gated on
     # do_log being FALSE (ni_activated branch).
     do_log = (not do_predict_nc) or do_prescribed_ccn
+
+    if smooth_width != 0.0:
+        # PORT_NOTES (smoothing, family "nucl"): JUMP — two switching
+        # variables gate a nucleation tendency that is finite at the
+        # thresholds: s1 = t_icenuc - temp, scale = 1 K; s2 =
+        # qv_supersat_i - 0.05, scale = 0.05 (the activation
+        # supersaturation). In the do_log branch, the additional
+        # n_nuc >= NSMALL gate stays hard (jump size NSMALL = 1e-16,
+        # effective kink).
+        hb = jnp.where(
+            context,
+            smoothing.step(t_icenuc - temp, smooth_width, scale=1.0)
+            * smoothing.step(jnp.asarray(qv_supersat_i) - 0.05,
+                             smooth_width, scale=0.05),
+            0.0)
+        if do_log:
+            dum = 0.005 * jnp.exp(opts["deposition_nucleation_exponent"]
+                                  * (c.Tmelt - temp)) * 1.0e3 * jnp.asarray(inv_rho)
+            dum = jnp.minimum(dum, 1.0e5 * jnp.asarray(inv_rho))
+            n_nuc = jnp.maximum(0.0, (dum - ni) * inv_dt)
+            ok = n_nuc >= c.NSMALL
+            q_nuc = jnp.maximum(0.0, (dum - ni) * mi0 * inv_dt)
+            return (jnp.where(ok, hb * q_nuc, 0.0),
+                    jnp.where(ok, hb * n_nuc, 0.0))
+        n_nuc = hb * jnp.maximum(
+            0.0, (jnp.asarray(ni_activated) - ni) * inv_dt)
+        q_nuc = n_nuc * mi0
+        return q_nuc, n_nuc
 
     if do_log:
         dum = 0.005 * jnp.exp(opts["deposition_nucleation_exponent"]
@@ -165,34 +195,63 @@ def ice_classical_nucleation(frzimm, frzcnt, frzdep, rho, qc_incld, nc_incld,
 
 
 def cldliq_immersion_freezing(T_atm, lamc, mu_c, cdist1, qc_incld,
-                              inv_qc_relvar, opts, context):
+                              inv_qc_relvar, opts, context, smooth_width=0.0):
     """Immersion freezing of cloud droplets (Bigg 1953 style)
     (Functions::cldliq_immersion_freezing). Returns
     (qc2qi_hetero_freeze_tend, nc2ni_immers_freeze_tend).
     sgs_var_coef = 1 in this branch."""
     T_atm = jnp.asarray(T_atm)
     qc_incld = jnp.asarray(qc_incld)
-    active = (qc_incld >= c.QSMALL) & (T_atm <= c.T_rainfrz) & context
+    if smooth_width == 0.0:
+        active = (qc_incld >= c.QSMALL) & (T_atm <= c.T_rainfrz) & context
+
+        exp_aimm = jnp.exp(opts["immersion_freezing_exponent"] * (c.T_zerodegc - T_atm))
+        lamc_safe = jnp.where(active & (jnp.asarray(lamc) > 0), jnp.asarray(lamc), 1.0)
+        inv_lamc3 = (1.0 / lamc_safe) ** 3
+
+        qchetc = jnp.where(active,
+                           c.CONS6 * jnp.asarray(cdist1) * _tgamma(7.0 + jnp.asarray(mu_c))
+                           * exp_aimm * inv_lamc3 ** 2, 0.0)
+        nchetc = jnp.where(active,
+                           c.CONS5 * jnp.asarray(cdist1) * _tgamma(4.0 + jnp.asarray(mu_c))
+                           * exp_aimm * inv_lamc3, 0.0)
+        return qchetc, nchetc
+
+    # PORT_NOTES (smoothing, family "frz"): JUMP — s = T_rainfrz - T_atm,
+    # scale = 1 K. The Bigg-freezing rate ~ exp_aimm is finite at
+    # T = T_rainfrz, so the T gate switches it on/off discontinuously.
+    # The qc >= QSMALL gate stays hard: the rate ~ cdist1 * inv_lamc^3
+    # -> 0 with qc (kink).
+    qc_ok = (qc_incld >= c.QSMALL) & context
+    hT = smoothing.step(c.T_rainfrz - T_atm, smooth_width, scale=1.0)
 
     exp_aimm = jnp.exp(opts["immersion_freezing_exponent"] * (c.T_zerodegc - T_atm))
-    lamc_safe = jnp.where(active & (jnp.asarray(lamc) > 0), jnp.asarray(lamc), 1.0)
+    lamc_safe = jnp.where(qc_ok & (jnp.asarray(lamc) > 0), jnp.asarray(lamc), 1.0)
     inv_lamc3 = (1.0 / lamc_safe) ** 3
 
-    qchetc = jnp.where(active,
-                       c.CONS6 * jnp.asarray(cdist1) * _tgamma(7.0 + jnp.asarray(mu_c))
+    qchetc = jnp.where(qc_ok,
+                       hT * c.CONS6 * jnp.asarray(cdist1) * _tgamma(7.0 + jnp.asarray(mu_c))
                        * exp_aimm * inv_lamc3 ** 2, 0.0)
-    nchetc = jnp.where(active,
-                       c.CONS5 * jnp.asarray(cdist1) * _tgamma(4.0 + jnp.asarray(mu_c))
+    nchetc = jnp.where(qc_ok,
+                       hT * c.CONS5 * jnp.asarray(cdist1) * _tgamma(4.0 + jnp.asarray(mu_c))
                        * exp_aimm * inv_lamc3, 0.0)
     return qchetc, nchetc
 
 
-def rain_immersion_freezing(T_atm, lamr, mu_r, cdistr, qr_incld, opts, context):
+def rain_immersion_freezing(T_atm, lamr, mu_r, cdistr, qr_incld, opts, context,
+                            smooth_width=0.0):
     """Immersion freezing of rain (Functions::rain_immersion_freezing).
     Returns (qr2qi_immers_freeze_tend, nr2ni_immers_freeze_tend)."""
     T_atm = jnp.asarray(T_atm)
     qr_incld = jnp.asarray(qr_incld)
-    active = (qr_incld >= c.QSMALL) & (T_atm <= c.T_rainfrz) & context
+    if smooth_width == 0.0:
+        active = (qr_incld >= c.QSMALL) & (T_atm <= c.T_rainfrz) & context
+    else:
+        # PORT_NOTES (smoothing, family "frz"): JUMP — s = T_rainfrz -
+        # T_atm, scale = 1 K; rate finite at the threshold (see
+        # cldliq_immersion_freezing). The qr >= QSMALL gate stays hard
+        # (rate ~ cdistr -> 0 with qr; kink).
+        active = (qr_incld >= c.QSMALL) & context
 
     cdistr_safe = jnp.where(active & (jnp.asarray(cdistr) > 0), jnp.asarray(cdistr), 1.0)
     lamr_safe = jnp.where(active & (jnp.asarray(lamr) > 0), jnp.asarray(lamr), 1.0)
@@ -207,6 +266,10 @@ def rain_immersion_freezing(T_atm, lamr, mu_r, cdistr, qr_incld, opts, context):
                       c.CONS5 * jnp.exp(jnp.log(cdistr_safe)
                                         + jnp.log(_tgamma(4.0 + mu_r))
                                         - 3.0 * jnp.log(lamr_safe)) * exp_aimm, 0.0)
+    if smooth_width != 0.0:
+        hT = smoothing.step(c.T_rainfrz - T_atm, smooth_width, scale=1.0)
+        qrcol = hT * qrcol
+        nrcol = hT * nrcol
     return qrcol, nrcol
 
 

@@ -20,6 +20,7 @@ import jax.numpy as jnp
 from jax.scipy.special import gammaln
 
 from ..foundation import constants as c
+from . import family_width
 from . import cell_average as ca
 from . import conservation as cons
 from . import processes_ice as pice
@@ -53,7 +54,8 @@ def get_cdistr_logn0r(qr, nr, mu_r, lamr, context):
 
 @functools.partial(jax.jit, static_argnames=(
     "predict_nc", "do_prescribed_ccn", "do_ice_production",
-    "use_hetfrz_classnuc", "use_separate_ice_liq_frac"))
+    "use_hetfrz_classnuc", "use_separate_ice_liq_frac",
+    "smooth_width", "smooth_families"))
 def p3_main_part2(predict_nc: bool, do_prescribed_ccn: bool,
                   do_ice_production: bool, use_hetfrz_classnuc: bool,
                   use_separate_ice_liq_frac: bool,
@@ -65,7 +67,7 @@ def p3_main_part2(predict_nc: bool, do_prescribed_ccn: bool,
                   inv_cld_frac_l, inv_cld_frac_i, inv_cld_frac_r,
                   ni_activated, inv_qc_relvar,
                   cld_frac_i, cld_frac_l, cld_frac_r, qv_prev, t_prev,
-                  st, opts):
+                  st, opts, smooth_width=0.0, smooth_families=None):
     """One pass of the process k-loop.
 
     st is the state dict from p3_main_part1 (updated in place semantically;
@@ -76,6 +78,13 @@ def p3_main_part2(predict_nc: bool, do_prescribed_ccn: bool,
     """
     inv_dt = 1.0 / dt
     g = dict(st)  # shallow copy; values replaced functionally
+
+    # static (trace-time) per-family smoothing widths; 0.0 = exact path
+    w_tmelt = family_width(smooth_width, smooth_families, "tmelt")
+    w_frz = family_width(smooth_width, smooth_families, "frz")
+    w_evap = family_width(smooth_width, smooth_families, "evap")
+    w_rime = family_width(smooth_width, smooth_families, "rime")
+    w_nucl = family_width(smooth_width, smooth_families, "nucl")
 
     T_atm = g["T_atm"]
     qv_supersat_i = g["qv_supersat_i"]
@@ -132,7 +141,8 @@ def p3_main_part2(predict_nc: bool, do_prescribed_ccn: bool,
     g["nr_incld"] = jnp.where(qi_gt, jnp.maximum(g["nr_incld"], c.NSMALL),
                               g["nr_incld"])
     rhop, qm_incld, bm_incld = calc_bulk_rho_rime(
-        g["qi_incld"], g["qm_incld"], g["bm_incld"], opts, qi_gt)
+        g["qi_incld"], g["qm_incld"], g["bm_incld"], opts, qi_gt,
+        smooth_width=w_rime)
     g["qm_incld"] = qm_incld
     g["bm_incld"] = bm_incld
     g["qm"] = jnp.where(qi_gt, qm_incld * cld_frac_i, g["qm"])
@@ -168,17 +178,20 @@ def p3_main_part2(predict_nc: bool, do_prescribed_ccn: bool,
         (t["qc2qi_collect_tend"], t["nc_collect_tend"],
          t["qc2qr_ice_shed_tend"], t["ncshdc"]) = pice.ice_cldliq_collection(
             g["rho"], T_atm, g["rhofaci"], t_qc2qi, g["qi_incld"],
-            g["qc_incld"], g["ni_incld"], g["nc_incld"], opts, not_skip_micro)
+            g["qc_incld"], g["ni_incld"], g["nc_incld"], opts, not_skip_micro,
+            smooth_width=w_tmelt)
         t["qr2qi_collect_tend"], t["nr_collect_tend"] = pice.ice_rain_collection(
             g["rho"], T_atm, g["rhofaci"], logn0r, t_nr_coll, t_qr2qi,
-            g["qi_incld"], g["ni_incld"], g["qr_incld"], opts, not_skip_micro)
+            g["qi_incld"], g["ni_incld"], g["qr_incld"], opts, not_skip_micro,
+            smooth_width=w_tmelt)
         t["ni_selfcollect_tend"] = pice.ice_self_collection(
             g["rho"], g["rhofaci"], t_ni_selfc, eii, g["qm_incld"],
             g["qi_incld"], g["ni_incld"], not_skip_micro)
 
     t["qi2qr_melt_tend"], t["ni2nr_melt_tend"] = pice.ice_melting(
         g["rho"], T_atm, pres, g["rhofaci"], t_melt, t_vent, dv, sc, mu, kap,
-        g["qv"], g["qi_incld"], g["ni_incld"], not_skip_micro)
+        g["qv"], g["qi_incld"], g["ni_incld"], not_skip_micro,
+        smooth_width=w_tmelt)
 
     if do_ice_production:
         (wetgrowth, t["qr2qi_collect_tend"], t["qc2qi_collect_tend"],
@@ -188,7 +201,8 @@ def p3_main_part2(predict_nc: bool, do_prescribed_ccn: bool,
                 mu, sc, g["qv"], g["qc_incld"], g["qi_incld"], g["ni_incld"],
                 g["qr_incld"], t["qr2qi_collect_tend"],
                 t["qc2qi_collect_tend"], t["nr_ice_shed_tend"],
-                t["qc2qr_ice_shed_tend"], not_skip_micro)
+                t["qc2qr_ice_shed_tend"], not_skip_micro,
+                smooth_width=w_tmelt)
 
     epsi, epsi_tot = pice.ice_relaxation_timescale(
         g["rho"], T_atm, g["rhofaci"], t_melt, t_vent, dv, mu, sc,
@@ -214,10 +228,11 @@ def p3_main_part2(predict_nc: bool, do_prescribed_ccn: bool,
             (t["qc2qi_hetero_freeze_tend"], t["nc2ni_immers_freeze_tend"]) = \
                 pwarm.cldliq_immersion_freezing(
                     T_atm, lamc, mu_c, cdist1, g["qc_incld"], inv_qc_relvar,
-                    opts, not_skip_micro)
+                    opts, not_skip_micro, smooth_width=w_frz)
         (t["qr2qi_immers_freeze_tend"], t["nr2ni_immers_freeze_tend"]) = \
             pwarm.rain_immersion_freezing(
-                T_atm, lamr, mu_r, cdistr, g["qr_incld"], opts, not_skip_micro)
+                T_atm, lamr, mu_r, cdistr, g["qr_incld"], opts, not_skip_micro,
+                smooth_width=w_frz)
 
     epsr, epsc = pice.calc_liq_relaxation_timescale(
         tables["revap_table_vals"], g["rho"], dv, mu, sc, mu_r, lamr, cdistr,
@@ -227,19 +242,21 @@ def p3_main_part2(predict_nc: bool, do_prescribed_ccn: bool,
         g["qr_incld"], g["qc_incld"], g["nr_incld"], g["qi_incld"],
         cld_frac_l, cld_frac_r, g["qv"], qv_prev, g["qv_sat_l"],
         g["qv_sat_i"], ab, abi, epsr, epsi_tot, T_atm, t_prev, dqsdt, dt,
-        not_skip_micro)
+        not_skip_micro, smooth_width=w_evap)
 
     if do_ice_production:
         (t["qv2qi_vapdep_tend"], t["qi2qv_sublim_tend"], t["ni_sublim_tend"],
          t["qc2qi_berg_tend"]) = pice.ice_deposition_sublimation(
             g["qi_incld"], g["ni_incld"], T_atm, g["qv_sat_l"], g["qv_sat_i"],
-            epsi, abi, g["qv"], inv_dt, not_skip_micro)
+            epsi, abi, g["qv"], inv_dt, not_skip_micro,
+            smooth_width=w_tmelt)
 
     # ---------- level-active (not_skip_all) section ----------
     if do_ice_production:
         t["qv2qi_nucleat_tend"], t["ni_nucleat_tend"] = pwarm.ice_nucleation(
             T_atm, g["inv_rho"], g["ni"], ni_activated, qv_supersat_i, inv_dt,
-            predict_nc, do_prescribed_ccn, opts, not_skip_all)
+            predict_nc, do_prescribed_ccn, opts, not_skip_all,
+            smooth_width=w_nucl)
 
     (t["qc2qr_autoconv_tend"], t["nc2nr_autoconv_tend"], t["ncautr"]) = \
         pwarm.cloud_water_autoconversion(

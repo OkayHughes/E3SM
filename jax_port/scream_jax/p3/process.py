@@ -34,7 +34,8 @@ _WATER_KEYS = ("qc", "nc", "qr", "nr", "qi", "ni", "qm", "bm", "qv")
     "predict_nc", "prescribed_ccn", "do_ice_production",
     "use_hetfrz_classnuc", "use_separate_ice_liq_frac",
     "set_cld_frac_l_to_one", "set_cld_frac_i_to_one",
-    "set_cld_frac_r_to_one", "sed_use_while_loop"))
+    "set_cld_frac_r_to_one", "sed_use_while_loop",
+    "smooth_width", "smooth_families"))
 def p3_process_step(dt,
                     predict_nc: bool, prescribed_ccn: bool,
                     do_ice_production: bool, use_hetfrz_classnuc: bool,
@@ -53,9 +54,16 @@ def p3_process_step(dt,
                     hetfrz_immersion_nucleation_tend=None,
                     hetfrz_contact_nucleation_tend=None,
                     hetfrz_deposition_nucleation_tend=None,
-                    sed_use_while_loop=True):
+                    sed_use_while_loop=True,
+                    smooth_width=0.0, smooth_families=None):
     """One P3 process step (one AD subcycle). Returns a dict of updated /
-    computed EAMxx fields keyed by their EAMxx field names."""
+    computed EAMxx fields keyed by their EAMxx field names.
+
+    smooth_width / smooth_families (static): approximation-by-identity
+    smoothing of P3's jump discontinuities. The default 0.0 is the
+    exact, bitwise-original scheme; smooth_width > 0 enables the smooth
+    surrogates (all site families, or only those named in the
+    smooth_families tuple — see scream_jax.p3.SMOOTH_FAMILIES)."""
     T_mid = jnp.asarray(T_mid)
     p_mid = jnp.asarray(p_mid)
     pseudo_density = jnp.asarray(pseudo_density)
@@ -114,7 +122,8 @@ def p3_process_step(dt,
         p_dry_mid, dz, pseudo_density_dry, inv_exner,
         qv_prev_dry, T_prev_micro_step,
         hetfrz[0], hetfrz[1], hetfrz[2], tables, opts,
-        sed_use_while_loop=sed_use_while_loop)
+        sed_use_while_loop=sed_use_while_loop,
+        smooth_width=smooth_width, smooth_families=smooth_families)
 
     # ---------------- p3_postamble ----------------
     # rescaled temperature update: T += (T(th_new) - T_before)*dp_dry/dp

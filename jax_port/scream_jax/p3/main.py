@@ -25,6 +25,7 @@ import functools
 import jax
 import jax.numpy as jnp
 
+from . import family_width
 from .main_part1 import p3_main_part1
 from .main_part2 import p3_main_part2
 from .main_part3 import p3_main_part3
@@ -44,7 +45,7 @@ def _sel(col_mask, a, b):
 @functools.partial(jax.jit, static_argnames=(
     "predict_nc", "prescribed_ccn", "do_ice_production",
     "use_hetfrz_classnuc", "use_separate_ice_liq_frac",
-    "sed_use_while_loop"))
+    "sed_use_while_loop", "smooth_width", "smooth_families"))
 def p3_main(dt,
             predict_nc: bool, prescribed_ccn: bool,
             do_ice_production: bool, use_hetfrz_classnuc: bool,
@@ -58,9 +59,14 @@ def p3_main(dt,
             hetfrz_immersion_nucleation_tend,
             hetfrz_contact_nucleation_tend,
             hetfrz_deposition_nucleation_tend,
-            tables, opts, sed_use_while_loop=True):
+            tables, opts, sed_use_while_loop=True,
+            smooth_width=0.0, smooth_families=None):
     """One P3 step. Returns a dict with the updated prognostics and all
-    diagnostic outputs (see the return statement)."""
+    diagnostic outputs (see the return statement).
+
+    smooth_width / smooth_families (static): approximation-by-identity
+    smoothing of P3's jump discontinuities; 0.0 (default) is the exact
+    bitwise-original scheme (see scream_jax.p3.SMOOTH_FAMILIES)."""
     inv_dt = 1.0 / dt
     inv_exner = jnp.asarray(inv_exner)
     dz = jnp.asarray(dz)
@@ -97,7 +103,8 @@ def p3_main(dt,
         tables, pres, dpres, dz, nc_nuceat_tend, inv_exner, exner,
         inv_cld_frac_l, inv_cld_frac_i, inv_cld_frac_r,
         ni_activated, inv_qc_relvar,
-        cld_frac_i, cld_frac_l, cld_frac_r, qv_prev, t_prev, st, opts)
+        cld_frac_i, cld_frac_l, cld_frac_r, qv_prev, t_prev, st, opts,
+        smooth_width=smooth_width, smooth_families=smooth_families)
 
     # first early exit: inactive columns keep their part1 state
     g = {k: _sel(active, g2[k], st[k]) for k in _STATE_KEYS}
@@ -149,7 +156,9 @@ def p3_main(dt,
         hf = homogeneous_freezing(
             g["T_atm"], inv_exner, sed["qc"], sed["nc"], sed["qr"],
             sed["nr"], sed["qi"], sed["ni"], sed["qm"], sed["bm"],
-            g["th_atm"])
+            g["th_atm"],
+            smooth_width=family_width(smooth_width, smooth_families,
+                                      "homog"))
         for k in ("qc", "nc", "qr", "nr", "qi", "ni", "qm", "bm"):
             sed[k] = hf[k]
         sed["th_atm"] = hf["th_atm"]

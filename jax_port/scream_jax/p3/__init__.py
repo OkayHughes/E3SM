@@ -8,6 +8,33 @@ k=0 model top, leading axes batch columns.
 
 from . import tables
 
+# Approximation-by-identity smoothing (scream_jax.foundation.smoothing):
+# p3_process_step / p3_main / p3_main_part2 take static kwargs
+# smooth_width (default 0.0 = exact, bitwise-original) and
+# smooth_families (None = all families when smooth_width > 0, else a
+# tuple drawn from SMOOTH_FAMILIES enabling site groups selectively for
+# ablation). Site inventory (switching variable s, per-site scale, and
+# jump-vs-kink justification) lives in comments at each adoption site:
+#   "homog"  homogeneous_freezing T_homogfrz gate     (sedimentation.py)
+#   "tmelt"  Tmelt/T_zerodegc gates in the ice kernels (processes_ice.py)
+#   "frz"    T_rainfrz immersion-freezing gates       (processes_warm.py)
+#   "evap"   evaporate_rain cloud-presence gate       (processes_ice.py)
+#   "rime"   calc_bulk_rho_rime BSMALL snap           (main_part3.py)
+#   "nucl"   ice_nucleation activation gate           (processes_warm.py)
+SMOOTH_FAMILIES = ("homog", "tmelt", "frz", "evap", "rime", "nucl")
+
+
+def family_width(smooth_width, smooth_families, family):
+    """Static (trace-time) per-family smoothing width: `smooth_width` if
+    `family` is enabled, else 0.0 (exact hard path). smooth_families=None
+    enables every family."""
+    if smooth_width == 0.0:
+        return 0.0
+    if smooth_families is None or family in smooth_families:
+        return smooth_width
+    return 0.0
+
+
 # Scalar runtime options with the C++ defaults (P3Runtime in
 # p3_functions.hpp). The boolean P3Runtime members are separate static
 # arguments of the ported functions, not opts entries.
