@@ -90,13 +90,24 @@ class ScreamPhysics:
         self.nsub = mac_mic_subcycles
         self.year = year
 
-    def step(self, s, dt, nstep, doy_start):
+    def step(self, s, dt, nstep, doy_start, ad_mode=False,
+             spa_outs=None, ad_checkpoint="process"):
         """Advance the physics suite one step.
 
         s: dict of EAMxx fields (updated in place semantically — a new
         dict is returned). doy_start: 0-based fractional day-of-year of
         the START of the step. nstep: completed-step count at start.
-        Returns the updated field dict."""
+        Returns the updated field dict.
+
+        ad_mode=False (default) is the validated, bitwise-sacred path
+        (host numpy round-trips between processes). ad_mode=True runs
+        the same physics as one end-to-end traceable JAX computation
+        (see _step_ad) so the step can sit under jax.grad / jax.jvp /
+        jax.jit; spa_outs / ad_checkpoint are only used in that mode."""
+        if ad_mode:
+            return self._step_ad(s, dt, nstep, doy_start,
+                                 spa_outs=spa_outs,
+                                 checkpoint=ad_checkpoint)
         s = dict(s)
         dt_sub = dt / self.nsub
 
@@ -173,3 +184,140 @@ class ScreamPhysics:
         for k, v in rad_out.items():
             s[k] = np.asarray(v)
         return s
+
+    # ------------------------------------------------------------------
+    # Differentiable (traceable) path
+    # ------------------------------------------------------------------
+    def spa_substep_outputs(self, dt, doy_start, p_mid):
+        """SPA outputs for every mac_mic substep of one step, computed
+        host-side (numpy). SPA is pure data interpolation in TIME and
+        source->target PRESSURE; no process in the suite modifies p_mid,
+        so hoisting it out of the traced region is exact. p_mid must be
+        concrete (numpy or non-traced jax array)."""
+        dt_sub = dt / self.nsub
+        p = np.asarray(p_mid)
+        return [spa_process_step(self.spa_data,
+                                 doy_start + (isub + 1) * dt_sub / 86400.0,
+                                 p)
+                for isub in range(self.nsub)]
+
+    def _step_ad(self, s, dt, nstep, doy_start, spa_outs=None,
+                 checkpoint="process"):
+        """One suite step as a single traceable JAX computation.
+
+        Same physics as the default path, with exactly these changes:
+          (a) no inter-process host round-trips — state stays jax
+              arrays end-to-end, so jax.grad/jvp/jit work through the
+              whole step;
+          (b) SPA is hoisted host-side (spa_substep_outputs; exact,
+              see there). Pass spa_outs precomputed if s["p_mid"] is a
+              tracer at call time;
+          (c) P3 sedimentation uses the bounded-scan realization
+              (sed_use_while_loop=False; bitwise-equal primal,
+              reverse-mode differentiable);
+          (d) process calls are wrapped in jax.checkpoint so reverse
+              mode stores only process-boundary states.
+
+        checkpoint: "process" (each of shoc/cld_fraction/p3/rrtmgp; the
+        default), "subcycle" (one checkpoint per mac_mic substep body +
+        one for rrtmgp; fewer residuals, more recompute), or "none".
+        RRTMGP's orbital/zenith pieces stay host-side inside the traced
+        region: they depend only on time and concrete lat/lon, never on
+        state, so they trace as constants."""
+        import jax
+        import jax.numpy as jnp
+
+        s = dict(s)
+        dt_sub = dt / self.nsub
+        if spa_outs is None:
+            spa_outs = self.spa_substep_outputs(dt, doy_start, s["p_mid"])
+
+        ck = jax.checkpoint if checkpoint != "none" else (lambda f: f)
+        ck_proc = jax.checkpoint if checkpoint == "process" else (lambda f: f)
+        ck_sub = jax.checkpoint if checkpoint == "subcycle" else (lambda f: f)
+
+        def shoc_fn(sub):
+            out = shoc_process_step(
+                dt_sub, self.npbl, self.cell_length,
+                SHOC_PARAMS["lambda_low"], SHOC_PARAMS["lambda_high"],
+                SHOC_PARAMS["lambda_slope"], SHOC_PARAMS["lambda_thresh"],
+                SHOC_PARAMS["thl2tune"], SHOC_PARAMS["qw2tune"],
+                SHOC_PARAMS["qwthl2tune"], SHOC_PARAMS["w2tune"],
+                SHOC_PARAMS["length_fac"], SHOC_PARAMS["c_diag_3rd_mom"],
+                SHOC_PARAMS["ckh"], SHOC_PARAMS["ckm"], False, False,
+                sub["T_mid"], sub["p_mid"], sub["p_int"],
+                sub["pseudo_density"], sub["omega"], sub["phis"],
+                sub["surf_sens_flux"], sub["surf_evap"],
+                sub["surf_mom_flux"][:, 0], sub["surf_mom_flux"][:, 1],
+                sub["qv"], sub["qc"], sub["tke"],
+                sub["horiz_winds"][:, 0, :], sub["horiz_winds"][:, 1, :],
+                sub["cldfrac_liq"], sub["sgs_buoy_flux"],
+                sub["eddy_diff_mom"])
+            new = dict(sub)
+            for k, v in out.items():
+                if k not in ("u_wind", "v_wind"):
+                    new[k] = v
+            new["horiz_winds"] = jnp.stack(
+                [jnp.asarray(out["u_wind"]), jnp.asarray(out["v_wind"])],
+                axis=1)
+            return new
+
+        def cldfrac_fn(sub):
+            ice, tot, ice4, tot4 = cld_fraction_main(
+                CLDFRAC_ICE_THRESHOLD, CLDFRAC_ICE_4OUT_THRESHOLD,
+                sub["qi"], sub["cldfrac_liq"])
+            return dict(sub, cldfrac_ice=ice, cldfrac_tot=tot,
+                        cldfrac_ice_for_analysis=ice4,
+                        cldfrac_tot_for_analysis=tot4)
+
+        def p3_fn(sub):
+            out = p3_process_step(
+                dt_sub, True, True, True, False, False, False, False,
+                False,
+                sub["T_mid"], sub["p_mid"], sub["p_dry_mid"],
+                sub["pseudo_density"], sub["pseudo_density_dry"],
+                sub["cldfrac_tot"],
+                sub["qv"], sub["qc"], sub["nc"], sub["qr"], sub["nr"],
+                sub["qi"], sub["qm"], sub["ni"], sub["bm"],
+                sub["qv_prev_micro_step"], sub["T_prev_micro_step"],
+                sub["nc_nuceat_tend"], sub["nccn"], sub["ni_activated"],
+                sub["inv_qc_relvar"],
+                sub["precip_liq_surf_mass"], sub["precip_ice_surf_mass"],
+                self.p3_tables, self.p3_opts,
+                sed_use_while_loop=False)
+            new = dict(sub)
+            new.update(out)
+            return new
+
+        def rad_fn(sub):
+            out = rrtmgp_process_step(
+                self.kd_sw, self.kd_lw, self.co_sw, self.co_lw,
+                self.rrtmgp_params, dt, nstep, self.year, doy_start + 1,
+                self.lat, self.lon,
+                sub["T_mid"], sub["p_mid"], sub["p_int"],
+                sub["pseudo_density"],
+                sub["sfc_alb_dir_vis"], sub["sfc_alb_dir_nir"],
+                sub["sfc_alb_dif_vis"], sub["sfc_alb_dif_nir"],
+                sub["qv"], sub["qc"], sub["nc"], sub["qi"],
+                sub["cldfrac_tot"],
+                sub["eff_radius_qc"], sub["eff_radius_qi"],
+                sub["surf_lw_flux_up"],
+                sub["o3_volume_mix_ratio"], sub["rad_heating_pdel"],
+                aero_tau_sw=sub["aero_tau_sw"],
+                aero_ssa_sw=sub["aero_ssa_sw"],
+                aero_g_sw=sub["aero_g_sw"],
+                aero_tau_lw=sub["aero_tau_lw"])
+            new = dict(sub)
+            new.update({k: jnp.asarray(v) for k, v in out.items()})
+            return new
+
+        def substep(sub, isub):
+            sub = ck_proc(shoc_fn)(sub)
+            sub = ck_proc(cldfrac_fn)(sub)
+            sub = dict(sub)
+            sub.update(spa_outs[isub])
+            return ck_proc(p3_fn)(sub)
+
+        for isub in range(self.nsub):
+            s = ck_sub(lambda sub, i=isub: substep(sub, i))(s)
+        return ck(rad_fn)(s)
